@@ -41,10 +41,13 @@ public:
                 _phase_50hz -= 2.0f * 3.14159265f;
             }
 
-            float sin1 = std::sin(_phase_50hz);
-            float sin2 = std::sin(2.0f * _phase_50hz);
-            float sin3 = std::sin(3.0f * _phase_50hz);
-            float sin5 = std::sin(5.0f * _phase_50hz);
+            float sin1 = sinf(_phase_50hz);
+            float cos1 = cosf(_phase_50hz);
+            float sin2 = 2.0f * sin1 * cos1;
+            float cos1_sq = cos1 * cos1;
+            float sin3 = sin1 * (4.0f * cos1_sq - 1.0f);
+            float sin1_sq = sin1 * sin1;
+            float sin5 = sin1 * (sin1_sq * (16.0f * sin1_sq - 20.0f) + 5.0f);
 
             // Crackle noise bursts
             _rng_state = _rng_state * 1664525u + 1013904223u;

@@ -66,6 +66,16 @@ public:
         return _current_load;
     }
 
+    uint8_t ActiveBridgeCount() const {
+        uint8_t count = 0;
+        for (size_t i = 0; i < kNumPads; ++i) {
+            for (size_t j = i + 1; j < kNumPads; ++j) {
+                if (_conductance[i][j] > 0.02f) count++;
+            }
+        }
+        return count;
+    }
+
     static constexpr bool IsAdjacent(size_t a, size_t b) {
         if (a > b) {
             size_t tmp = a; a = b; b = tmp;

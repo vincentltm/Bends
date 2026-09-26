@@ -83,7 +83,7 @@ public:
 
         float Process(float target_sec, float max_snap = 0.75f) {
             if (target_sec >= 0.035f) {
-                current_sec += 0.025f * (target_sec - current_sec);
+                current_sec = target_sec;
                 prev_target = target_sec;
                 return current_sec;
             }

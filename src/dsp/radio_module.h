@@ -25,10 +25,10 @@ public:
     void Process(float in_l, float in_r, float& out_l, float& out_r) override {
         float out = 0.0f;
         if (_whine_amp > 0.0005f) {
-            _rf_phase += (6.2831853f * _rf_freq) / _sample_rate;
+            _rf_phase += _rf_phase_inc;
             if (_rf_phase >= 6.2831853f) _rf_phase -= 6.2831853f;
-            float main_c = std::sin(_rf_phase);
-            float sub_c  = std::sin(_rf_phase * 0.5015f);
+            float main_c = sinf(_rf_phase);
+            float sub_c  = sinf(_rf_phase * 0.5015f);
             float raw_rf = main_c * 0.65f + (main_c * sub_c) * 0.70f;
             out = (raw_rf / (1.0f + 0.4f * std::abs(raw_rf))) * _whine_amp;
         }
@@ -49,8 +49,13 @@ public:
 
     void SetParam(uint8_t id, float value) override {
         switch (id) {
-            case 0: _rf_freq   = daisysp::fclamp(value, 40.0f, 14000.0f); break;
-            case 1: _whine_amp = daisysp::fclamp(value, 0.0f, 0.10f); break;
+            case 0:
+                _rf_freq = daisysp::fclamp(value, 40.0f, 14000.0f);
+                _rf_phase_inc = (6.2831853f * _rf_freq) / _sample_rate;
+                break;
+            case 1:
+                _whine_amp = daisysp::fclamp(value, 0.0f, 0.10f);
+                break;
         }
     }
 
@@ -67,6 +72,7 @@ public:
 private:
     float _sample_rate{48000.0f};
     float _rf_freq{1200.0f};
+    float _rf_phase_inc{0.15707963f};
     float _rf_phase{0.0f};
     float _whine_amp{0.0f};
 };

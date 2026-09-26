@@ -22,13 +22,17 @@ void AudioCallback(AudioHandle::InputBuffer in,
 
 int main(void) {
     hw.Init(true);
-    // Ultra-low latency 48-sample block size (1.0 ms)
-    hw.SetAudioBlockSize(48);
+    // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes.
+    // Eliminates microcode stalls on denormals during decaying audio tails.
+    __set_FPSCR(__get_FPSCR() | (1 << 24) | (1 << 25));
+
+    // Optimized 64-sample block size (1.33 ms, reduces interrupt overhead by 25%)
+    hw.SetAudioBlockSize(64);
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
     touch.Init(hw);
     bender.Init();
-    engine.Init(hw.AudioSampleRate(), 48);
+    engine.Init(hw.AudioSampleRate(), 64);
     controller.Init(&engine);
 
     // Calibrate baseline tracking on startup

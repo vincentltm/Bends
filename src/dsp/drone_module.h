@@ -1,6 +1,7 @@
 #pragma once
 
 #include "module.h"
+#include "fast_math.h"
 #include "daisysp.h"
 #include <cmath>
 #include <algorithm>
@@ -38,16 +39,22 @@ public:
     void Process(float in_l, float in_r, float& out_l, float& out_r) override {
         float in_mono = 0.5f * (in_l + in_r);
         float total_drive = daisysp::fclamp(_drive + _aux_in[1], 0.0f, 2.0f);
-        float dry_headroom = 0.15f + 0.85f * _vcc;
+        // Voltage starve on input audio: full headroom above ~half (0.52), engages smoothly below half
+        float input_vcc = 1.0f;
+        if (_vcc < 0.52f) {
+            float t = _vcc * 1.9230769f; // _vcc / 0.52f
+            input_vcc = t * t * (3.0f - 2.0f * t);
+        }
+        float dry_headroom = 0.15f + 0.85f * input_vcc;
         float preamp_in = in_mono * (1.0f + total_drive * 3.5f);
         float ext_sig = (preamp_in / (1.0f + (0.35f / dry_headroom) * std::abs(preamp_in))) * dry_headroom;
 
-        float starve = daisysp::fclamp(1.0f - _vcc, 0.0f, 1.0f);
+        float starve = daisysp::fclamp((0.52f - _vcc) * 1.9230769f, 0.0f, 1.0f);
 
         _gate_amp_smooth += 0.006f * (_gate_amp - _gate_amp_smooth);
 
         float pitch_offset = daisysp::fclamp(_aux_in[0], -2.5f, 1.0f);
-        float target_freq = daisysp::fclamp(_base_freq * std::pow(2.0f, pitch_offset), 15.0f, 3200.0f);
+        float target_freq = daisysp::fclamp(_base_freq * FastPow2(pitch_offset), 15.0f, 3200.0f);
         _current_freq += 0.05f * (target_freq - _current_freq);
 
         // Clock jitter when starved
@@ -142,8 +149,11 @@ private:
 
         // Bit crush
         if (starve > 0.12f) {
-            float quant_levels = 512.0f / (1.0f + starve * starve * 48.0f);
-            s = std::round(s * quant_levels) / quant_levels;
+            float starve_sq = starve * starve;
+            float denom = 1.0f + starve_sq * 48.0f;
+            float quant_levels = 512.0f / denom;
+            float inv_quant = denom * (1.0f / 512.0f);
+            s = roundf(s * quant_levels) * inv_quant;
         }
 
         // Crossover deadband
@@ -162,9 +172,11 @@ private:
         float rail_pos = 1.0f - starve * 0.40f;
         float rail_neg = -(1.0f - starve * 0.50f);
         if (s > rail_pos) {
-            s = rail_pos + (s - rail_pos) / (1.0f + 2.0f * (s - rail_pos));
+            float diff = s - rail_pos;
+            s = rail_pos + diff / (1.0f + 2.0f * diff);
         } else if (s < rail_neg) {
-            s = rail_neg + (s - rail_neg) / (1.0f + 2.0f * std::abs(s - rail_neg));
+            float diff = s - rail_neg;
+            s = rail_neg + diff / (1.0f - 2.0f * diff);
         }
 
         // Wavefolding

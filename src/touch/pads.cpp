@@ -18,17 +18,17 @@ uint8_t Pads::ReadRegister(uint8_t reg) {
 }
 
 bool Pads::ReadBurst(uint8_t start_reg, uint8_t* buffer, uint16_t size) {
-    if (_i2c.TransmitBlocking(kMpr121Addr, &start_reg, 1, 3) != I2CHandle::Result::OK) {
+    if (_i2c.TransmitBlocking(kMpr121Addr, &start_reg, 1, 10) != I2CHandle::Result::OK) {
         _consecutive_errors++;
-        if (_consecutive_errors >= 3) {
+        if (_consecutive_errors >= 6) {
             _i2c.Init(_i2c_conf);
             _consecutive_errors = 0;
         }
         return false;
     }
-    if (_i2c.ReceiveBlocking(kMpr121Addr, buffer, size, 4) != I2CHandle::Result::OK) {
+    if (_i2c.ReceiveBlocking(kMpr121Addr, buffer, size, 12) != I2CHandle::Result::OK) {
         _consecutive_errors++;
-        if (_consecutive_errors >= 3) {
+        if (_consecutive_errors >= 6) {
             _i2c.Init(_i2c_conf);
             _consecutive_errors = 0;
         }
