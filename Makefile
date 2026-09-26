@@ -1,15 +1,32 @@
-.DEFAULT_GOAL := libs
+TARGET = bends
+OPT = -O2
+CPP_STANDARD = -std=gnu++17
 
-# Build hardware library submodules
+CPP_SOURCES = \
+    src/main.cpp \
+    src/touch/knobs.cpp \
+    src/touch/pads.cpp \
+    src/touch/switches.cpp
+
+C_INCLUDES = \
+    -Isrc \
+    -Isrc/core \
+    -Isrc/dsp \
+    -Isrc/touch \
+    -Isrc/engine
+
+LIBDAISY_DIR ?= lib/libDaisy
+DAISYSP_DIR ?= lib/DaisySP
+
+SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
+include $(SYSTEM_FILES_DIR)/Makefile
+
 libs:
-	$(MAKE) -C lib/libDaisy -j4
-	$(MAKE) -C lib/DaisySP -j4
+	$(MAKE) -C $(LIBDAISY_DIR) -j4
+	$(MAKE) -C $(DAISYSP_DIR) -j4
 
 clean-libs:
-	$(MAKE) -C lib/libDaisy clean
-	$(MAKE) -C lib/DaisySP clean
+	$(MAKE) -C $(LIBDAISY_DIR) clean
+	$(MAKE) -C $(DAISYSP_DIR) clean
 
-clean:
-	rm -rf build/
-
-.PHONY: libs clean-libs clean
+.PHONY: libs clean-libs

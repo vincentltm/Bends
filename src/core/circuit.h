@@ -13,23 +13,7 @@ constexpr uint8_t kMaxConnections = 32;
 constexpr uint8_t kMaxFeedback    = 8;
 constexpr uint8_t kInvalidModule  = 255;
 
-// Audio graph execution engine.
-//
-// Manages a patch of interconnected DSP modules. Arbitrary bridging on the
-// physical surface frequently forms feedback loops (e.g. delay output fed back into
-// filter input, or resonance self-modulation). In digital signal processing,
-// delay-free loops cannot be computed directly without solving implicit systems.
-//
-// This engine resolves feedback cycles by inserting a 1-sample unit delay (z^-1)
-// on all back-edges identified during topological sort. Processing is interleaved
-// sample-by-sample so that feedback paths have true single-sample latency at the
-// audio rate (48 kHz), preserving tight feedback characteristics.
-//
-// References:
-// - G. Borin, G. De Poli, D. Rocchesso, "Elimination of delay-free loops in discrete-time models" (2000)
-//   https://doi.org/10.1109/89.861380
-// - A.B. Kahn, "Topological sorting of large networks" (1962)
-//   https://doi.org/10.1145/368996.369025
+// Audio graph engine. Runs modules in order and handles feedback loops with a 1-sample delay.
 class Circuit {
 public:
     Circuit() {
@@ -71,8 +55,18 @@ public:
         }
     }
 
+    template <typename ModIdT>
+    void RegisterModule(ModIdT id, Module* module) {
+        RegisterModule(static_cast<uint8_t>(id), module);
+    }
+
     Module* GetModule(uint8_t id) const {
         return (id < kMaxModules) ? _modules[id] : nullptr;
+    }
+
+    template <typename ModIdT>
+    Module* GetModule(ModIdT id) const {
+        return GetModule(static_cast<uint8_t>(id));
     }
 
     bool Connect(const Connection& conn) {
@@ -105,12 +99,14 @@ public:
         }
     }
 
-    // Resolves execution order using Kahn's topological sorting algorithm.
-    //
-    // Modules with zero in-degree are scheduled first. When a feedback cycle
-    // is detected (edges pointing backward in the execution order, or self-loops),
-    // those connections are tagged with `is_feedback = true` and allocated to
-    // a unit-delay buffer (_fb_buffers).
+    uint8_t NumModules() const { return kMaxModules; }
+    uint8_t NumConnections() const { return _num_connections; }
+    const Connection& GetConnection(uint8_t idx) const { return _connections[idx]; }
+    float GetConnectionGain(uint8_t conn_idx) const {
+        return (conn_idx < _num_connections) ? _connections[conn_idx].gain : 0.0f;
+    }
+
+    // Sort modules by dependency order. Feedback connections get a 1-sample delay.
     void Compile() {
         _num_feedback = 0;
         _num_exec_modules = 0;
@@ -206,23 +202,23 @@ public:
         // Root modules have no feedforward incoming connections
         for (uint8_t i = 0; i < kMaxModules; ++i) {
             _is_root[i] = true;
+            _num_mod_forward[i] = 0;
         }
         for (uint8_t c = 0; c < _num_connections; ++c) {
             if (!_connections[c].is_feedback) {
+                uint8_t u = _connections[c].src_module;
                 uint8_t v = _connections[c].dst_module;
                 if (v < kMaxModules) {
                     _is_root[v] = false;
+                }
+                if (u < kMaxModules) {
+                    _mod_forward_wires[u][_num_mod_forward[u]++] = c;
                 }
             }
         }
     }
 
-    // Runs audio processing over the block with sample-level interleaving.
-    //
-    // For each sample tick:
-    // 1. Module inputs are seeded with feedback from sample (t - 1).
-    // 2. Feedforward connections transfer audio within the current sample tick.
-    // 3. New feedback state is captured for sample (t + 1).
+    // Process audio block sample-by-sample
     void ProcessBlock(const float* in_l, const float* in_r,
                       float* out_l, float* out_r,
                       uint16_t block_size) {
@@ -247,9 +243,10 @@ public:
             // Distribute feedback connections
             for (uint8_t f = 0; f < _num_feedback; ++f) {
                 uint8_t c = _fb_wire_indices[f];
-                uint8_t dst = _connections[c].dst_module;
                 float gain = _connections[c].gain;
+                if (gain == 0.0f) continue;
 
+                uint8_t dst = _connections[c].dst_module;
                 if (_connections[c].dst_port == kPortMainL) {
                     mod_in_l[dst] += current_fb[f][0] * gain;
                 } else if (_connections[c].dst_port == kPortMainR) {
@@ -277,26 +274,28 @@ public:
                 mod->Process(mod_in_l[u], mod_in_r[u], mod_out_l[u], mod_out_r[u]);
 
                 // Distribute forward connections from this module
-                for (uint8_t c = 0; c < _num_connections; ++c) {
-                    if (_connections[c].src_module == u && !_connections[c].is_feedback) {
-                        uint8_t dst = _connections[c].dst_module;
-                        float gain  = _connections[c].gain;
-                        float sig_l = (_connections[c].src_port == kPortMainR) ? mod_out_r[u] : mod_out_l[u];
-                        float sig_r = mod_out_r[u];
+                uint8_t num_fwd = _num_mod_forward[u];
+                for (uint8_t f = 0; f < num_fwd; ++f) {
+                    uint8_t c = _mod_forward_wires[u][f];
+                    float gain  = _connections[c].gain;
+                    if (gain == 0.0f) continue;
 
-                        if (_connections[c].src_port >= kPortAux0) {
-                            sig_l = mod->GetAuxOutput(_connections[c].src_port - kPortAux0);
-                            sig_r = sig_l;
-                        }
+                    uint8_t dst = _connections[c].dst_module;
+                    float sig_l = (_connections[c].src_port == kPortMainR) ? mod_out_r[u] : mod_out_l[u];
+                    float sig_r = mod_out_r[u];
 
-                        if (_connections[c].dst_port == kPortMainL) {
-                            mod_in_l[dst] += sig_l * gain;
-                        } else if (_connections[c].dst_port == kPortMainR) {
-                            mod_in_r[dst] += sig_r * gain;
-                        } else {
-                            if (_modules[dst]) {
-                                _modules[dst]->SetAuxInput(_connections[c].dst_port - kPortAux0, sig_l * gain);
-                            }
+                    if (_connections[c].src_port >= kPortAux0) {
+                        sig_l = mod->GetAuxOutput(_connections[c].src_port - kPortAux0);
+                        sig_r = sig_l;
+                    }
+
+                    if (_connections[c].dst_port == kPortMainL) {
+                        mod_in_l[dst] += sig_l * gain;
+                    } else if (_connections[c].dst_port == kPortMainR) {
+                        mod_in_r[dst] += sig_r * gain;
+                    } else {
+                        if (_modules[dst]) {
+                            _modules[dst]->SetAuxInput(_connections[c].dst_port - kPortAux0, sig_l * gain);
                         }
                     }
                 }
@@ -344,6 +343,8 @@ private:
     uint8_t    _num_feedback = 0;
 
     bool       _is_root[kMaxModules] = {true};
+    uint8_t    _num_mod_forward[kMaxModules] = {0};
+    uint8_t    _mod_forward_wires[kMaxModules][kMaxConnections] = {{0}};
 };
 
 } // namespace bends
