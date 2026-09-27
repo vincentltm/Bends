@@ -35,25 +35,21 @@ struct LoFiDelayModel {
     }
 
     inline void Prepare(float delay_sec, float voltage, float sample_rate) {
-        // Voltage fader directly controls the delay clock frequency / sample rate!
-        // At voltage >= 0.98 (5V full rail): full 48 kHz pristine clean delay (bypassed).
-        // As voltage drops towards 0V: clock downsampling drops from 48 kHz down to ~3.8 kHz,
+        // Voltage fader controls the delay clock frequency / sample rate.
+        // At voltage >= 0.85 (healthy upper rail): full 48 kHz pristine clean delay (bypassed).
+        // Below 0.85, downsampling drops smoothly from 48 kHz down to ~3.8 kHz at 0V,
         // producing rich, metallic, gritty PT2399-style aliasing without any Doppler pitch wobble!
-        if (voltage >= 0.98f) {
+        if (voltage >= 0.85f) {
             active = false;
             return;
         }
 
         active = true;
 
-        // Quadratic fader curve gives precise, musical control over the aliasing sweet spots:
-        // v = 0.90 -> ~39 kHz (subtle tape warmth)
-        // v = 0.60 -> ~18 kHz (vintage 12-bit sampler crunch)
-        // v = 0.35 -> ~8.5 kHz (PT2399 metallic ringing chime)
-        // v = 0.15 -> ~4.8 kHz (heavy 8-bit grit)
-        // v = 0.00 -> ~3.8 kHz (extreme lo-fi aliased repeats)
+        // Normalized fader curve smoothly sweeps downsampling below 0.85:
+        float v_norm = daisysp::fclamp(voltage / 0.85f, 0.0f, 1.0f);
         float delay_scale = 1.0f + daisysp::fclamp((delay_sec - 0.20f) / 3.0f, 0.0f, 0.4f);
-        float v_curved = voltage * voltage;
+        float v_curved = v_norm * v_norm;
         float min_clock = 0.08f / delay_scale;
         clock_speed = daisysp::fclamp(min_clock + (1.0f - min_clock) * v_curved, 0.05f, 1.0f);
 

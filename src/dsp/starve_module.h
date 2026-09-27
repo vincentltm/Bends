@@ -66,7 +66,16 @@ public:
             _headroom = 0.08f + 0.92f * (audio_vcc * audio_vcc);
             _inv_headroom = 1.0f / _headroom;
             _asym_bias = (1.0f - audio_vcc) * _asym * 0.30f;
-            _deadband = (1.0f - audio_vcc) * 0.015f;
+            // Deadband only engages under severe brownout (< 0.20 Vcc) to prevent crossover buzz on clean signals
+            _deadband = (audio_vcc < 0.20f) ? (0.20f - audio_vcc) * 0.035f : 0.0f;
+        }
+
+        // Clean linear bypass when power rail is healthy and drive is low
+        if (audio_vcc >= 0.92f && _drive < 0.05f) {
+            out_l = in_l;
+            out_r = in_r;
+            _aux_in[0] = 0.0f;
+            return;
         }
 
         // Sputter / motorboat when voltage is very low (< 0.2)
@@ -88,7 +97,7 @@ public:
             float saturated = (biased / (1.0f + 0.45f * std::abs(biased))) * _headroom;
 
             // Crossover deadband
-            if (_deadband > 0.002f) {
+            if (_deadband > 0.001f) {
                 if (saturated > _deadband) saturated -= _deadband;
                 else if (saturated < -_deadband) saturated += _deadband;
                 else saturated = 0.0f;

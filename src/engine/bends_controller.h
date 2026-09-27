@@ -17,6 +17,7 @@ class BendsController {
 public:
     void Init(BendsEngine* engine) {
         _engine = engine;
+        _prev_p01 = 0.0f;
         _prev_p02 = 0.0f;
         _prev_p09 = 0.0f;
         _p02_strike_cooldown = 0;
@@ -34,10 +35,16 @@ public:
         ProcessSwitchA(touch);
         float drone_pitch_val = ProcessKnobs(touch, bender);
         float starve_amount = 1.0f - _engine->GetVcc();
+        float drive_val = _engine->GetDrive();
+        // Master internal generator drive: when S30 Drive is turned low, internal generators
+        // (P00 drone, P01 corrupt, P02 click, P03 hum, P07 radio) are muted so clean external
+        // input audio can be processed through filter, starve, delay, and bends without interference!
+        float gen_drive = daisysp::fclamp((drive_val - 0.03f) / 0.97f, 0.0f, 1.0f);
 
-        ProcessDrone(touch, bender);
-        ProcessClick(touch, bender, drone_pitch_val);
-        ProcessHumAndRadio(touch, bender, drone_pitch_val, starve_amount);
+        ProcessDrone(touch, bender, gen_drive);
+        ProcessCorrupt(touch, bender, drone_pitch_val, starve_amount, gen_drive);
+        ProcessClick(touch, bender, drone_pitch_val, gen_drive);
+        ProcessHumAndRadio(touch, bender, drone_pitch_val, starve_amount, gen_drive);
         ProcessDelayAndBends(touch, bender, drone_pitch_val);
         UpdateLedBrightness(touch, bender);
     }
@@ -65,8 +72,7 @@ private:
             _was_a_up = a_up;
             _was_a_down = any_down;
             if (a_up) {
-                // Boot in Freeze: populate uninitialized RAM texture into SDRAM and freeze!
-                _engine->SeedUninitializedRam(0x1337BEEF);
+                // Boot in Freeze: clean freeze on whatever is in buffer
                 _engine->SetDelayFreeze(true);
             }
             return;
@@ -76,7 +82,7 @@ private:
             // While held Down: keep Down-to-Freeze gesture timer primed (~350ms in 1ms ticks)
             _down_to_freeze_counter = 280;
             if (!_was_a_down) {
-                // Instantly wipe runaway audio & engage chassis bootup drone + clicks + sprinkled RAM
+                // Instantly wipe runaway audio & engage chassis bootup drone + clicks + sprinkled memory
                 _engine->EnterFloatingState();
             }
         } else {
@@ -92,17 +98,10 @@ private:
             }
         }
 
-        // Switch A Up: Dedicated buffer freeze & Down-to-Freeze gesture
+        // Switch A Up: Dedicated clean buffer freeze
         if (a_up && !_was_a_up) {
-            if (_down_to_freeze_counter > 0) {
-                // Direct Down -> Up flick gesture!
-                // Instantly generate a rich, unique "Uninitialized RAM" texture snapshot into SDRAM and freeze!
-                _led_rng = _led_rng * 1664525u + 1013904223u;
-                _engine->SeedUninitializedRam(_led_rng);
-                _down_to_freeze_counter = 0;
-            } else {
-                _engine->SetDelayFreeze(true);
-            }
+            _engine->SetDelayFreeze(true);
+            _down_to_freeze_counter = 0;
         } else if (!a_up && _was_a_up) {
             _engine->SetDelayFreeze(false);
         }
@@ -129,6 +128,7 @@ private:
 
         _current_res = res_raw;
         _current_cutoff = cutoff_raw;
+        _current_fb = touch.knobs().s34();
 
         // S30 Drive load on the power rail: cranking drive pulls extra current from Vcc (~6% sag at max)
         float drive_draw = (drive_raw * drive_raw) * 0.06f;
@@ -183,7 +183,7 @@ private:
         return drone_pitch_val;
     }
 
-    void ProcessDrone(synthux::Touch& touch, TouchBender& bender) {
+    void ProcessDrone(synthux::Touch& touch, TouchBender& bender, float gen_drive) {
         float p00_touch = bender.Pressure(0);
         float p00_prox  = touch.air().PadProximity(0);
 
@@ -193,8 +193,9 @@ private:
 
         // Pad 0 pressure opens drone volume:
         // Responsive sensitivity curve that picks up early on light metal while maintaining dynamic range
+        // Muted when S30 Drive is low
         float p00_norm = daisysp::fclamp((p00_touch - 0.008f) / 0.992f, 0.0f, 1.0f);
-        float p00_vca  = p00_norm * (0.35f + 0.65f * p00_norm);
+        float p00_vca  = p00_norm * (0.35f + 0.65f * p00_norm) * gen_drive;
         _engine->SetVca(p00_vca);
         _engine->SetSub(0.25f + p00_touch * 0.75f);
 
@@ -211,7 +212,35 @@ private:
         }
     }
 
-    void ProcessClick(synthux::Touch& /*touch*/, TouchBender& bender, float clock_val) {
+    void ProcessCorrupt(synthux::Touch& touch, TouchBender& bender, float drone_pitch_val, float starve_amount, float gen_drive) {
+        float p01_touch = bender.Pressure(1);
+        float p01_prox  = touch.air().PadProximity(1);
+
+        // Touch attack triggers a new corrupted memory personality and anchor
+        if (p01_touch > 0.02f && _prev_p01 <= 0.02f) {
+            _engine->TriggerCorruptPersonality();
+        }
+        _prev_p01 = p01_touch;
+
+        // Gentle volume curve: never loud or harsh (max 0.28), muted when S30 is low
+        float p01_norm = daisysp::fclamp((p01_touch - 0.015f) / 0.985f, 0.0f, 1.0f);
+        float p01_air  = daisysp::fclamp((p01_prox - 0.08f) / 0.80f, 0.0f, 1.0f) * 0.10f;
+        float corrupt_vol = (p01_norm > 0.0f || p01_air > 0.0f) ? (0.05f + 0.23f * p01_norm + p01_air) * gen_drive : 0.0f;
+        _engine->SetCorruptVolume(corrupt_vol);
+        _engine->SetCorruptPressure(p01_norm);
+        _engine->SetCorruptPitch(drone_pitch_val);
+
+        // Pad 1 circuit bend interactions:
+        _engine->SetCorruptClickMod(bender.Conductance(1, 2));     // P01 <-> P02 Click pings
+        _engine->SetCorruptReverseMod(bender.Conductance(1, 5));   // P01 <-> P05 Reverse scan
+        _engine->SetCorruptClockMod(bender.Conductance(1, 6));     // P01 <-> P06 Clock FM
+        _engine->SetCorruptDiffusionMod(bender.Conductance(1, 8)); // P01 <-> P08 Ground / Diffusion
+        _engine->SetCorruptGlitchMod(bender.Conductance(1, 9));    // P01 <-> P09 S&H / Glitch
+        _engine->SetCorruptStarveMod(daisysp::fclamp(bender.Conductance(1, 4) * 1.5f + starve_amount, 0.0f, 1.0f)); // P01 <-> P04 Starve
+        _engine->SetCorruptDroneMod(bender.Conductance(0, 1));     // P01 <-> P00 Drone modulation
+    }
+
+    void ProcessClick(synthux::Touch& /*touch*/, TouchBender& bender, float clock_val, float gen_drive) {
         if (_p02_strike_cooldown > 0) {
             _p02_strike_cooldown--;
         }
@@ -221,15 +250,21 @@ private:
         // Sensitive strike threshold (0.04f) catches light metal taps & coin drops
         if (_p02_strike_cooldown == 0 && p02_dp > 0.04f) {
             float strike_vel = daisysp::fclamp(p02_dp * 3.2f + 0.08f, 0.08f, 1.0f);
-            _engine->StrikeClick(strike_vel);
+            if (gen_drive > 0.01f) {
+                _engine->StrikeClick(strike_vel * gen_drive);
+            }
             _p02_strike_cooldown = 110; // 110ms debounce window
             strike_triggered = true;
         }
         _prev_p02 = p02_touch;
 
-        _engine->SetClickPressure(p02_touch);
+        _engine->SetClickPressure(p02_touch * gen_drive);
         _engine->SetClickPitch(clock_val);
         _engine->SetClickRate(clock_val);
+
+        // Geiger scaling: metronome when high voltage and unbridged, Poisson Geiger clicks when starved or bridged to P01/P04/P08
+        float cond_geiger = std::max({bender.Conductance(1, 2), bender.Conductance(2, 4), bender.Conductance(2, 8)});
+        _engine->SetClickGeigerBend(cond_geiger);
 
         // P02<->P06: Delay subdivision sync (smooth crossfade with conductance)
         float cond_delay_sync = bender.Conductance(2, 6);
@@ -242,8 +277,8 @@ private:
 
         if (total_ping > 0.05f) {
             _engine->SetClickFilterBlend(total_ping);
-            if (strike_triggered) {
-                _engine->PingFilter(p02_dp * 2.0f * total_ping);
+            if (strike_triggered && gen_drive > 0.01f) {
+                _engine->PingFilter(p02_dp * 2.0f * total_ping * gen_drive);
             }
         } else {
             _engine->SetClickFilterBlend(0.0f);
@@ -263,30 +298,32 @@ private:
                                     bender.Conductance(2, 4), bender.Conductance(2, 6)});
         _engine->SetClickPoly(cond_poly);
 
-        float cond_click_delay = bender.Conductance(2, 6) * 1.5f;
+        // Direct Click to Delay: tamed from 1.5f to 0.30f to stop runaway audio-rate blowout!
+        float cond_click_delay = bender.Conductance(2, 6) * 0.30f;
         _engine->SetBridgeGain(BridgeId::ClickToDelayL, cond_click_delay);
         _engine->SetBridgeGain(BridgeId::ClickToDelayR, cond_click_delay);
     }
 
-    void ProcessHumAndRadio(synthux::Touch& touch, TouchBender& bender, float clock_val, float starve_amount) {
+    void ProcessHumAndRadio(synthux::Touch& touch, TouchBender& bender, float clock_val, float starve_amount, float gen_drive) {
         // P03 Audio / Hum Antenna:
         // Captures authentic 50 Hz mains electromagnetic buzz and contact crackle.
         // Hovering / light contact picks up air buzz; firm touch increases hum volume.
         // Bridging P03 to Ground (P08) shunts and silences the buzz.
+        // Muted when S30 Drive is low.
         float p03_touch = bender.Pressure(3);
         float p03_prox  = touch.air().PadProximity(3);
         float p03_shunt = bender.Conductance(3, 8);
 
-        float drive_val = _engine->GetDrive();
-        float hum_gain  = drive_val * drive_val * 0.55f;
+        float hum_gain  = gen_drive * gen_drive * 0.55f;
 
         // Grounding shunt: bridging P03 to P08 silences the antenna buzz
         float grounding = daisysp::fclamp(p03_shunt * 1.6f, 0.0f, 1.0f);
-        float p03_buzz  = (p03_touch * 0.22f + p03_prox * 0.07f) * hum_gain * (1.0f - grounding);
+        float p03_air   = daisysp::fclamp((p03_prox - 0.08f) / 0.80f, 0.0f, 1.0f);
+        float p03_buzz  = (p03_touch * 0.22f + p03_air * 0.07f) * hum_gain * (1.0f - grounding);
 
-        // Background chassis load hum (very quiet, deepens with starve)
+        // Background chassis load hum (very quiet, only deepens when circuit is actually starved)
         float touch_total = bender.CurrentLoad();
-        float base_hum  = (touch_total > 0.005f) ? ((0.0008f + 0.0018f * starve_amount) * (drive_val * drive_val)) : 0.0f;
+        float base_hum  = (touch_total > 0.02f && starve_amount > 0.08f) ? ((0.0006f + 0.0016f * starve_amount) * (gen_drive * gen_drive)) : 0.0f;
         _engine->SetHum(p03_buzz, base_hum);
 
         // P08 Delay Diffusion (Chassis Ground / Reverb Wash):
@@ -305,14 +342,24 @@ private:
         float diffusion_amt = daisysp::fclamp(p08_diff * 0.92f + p08_prox_diff + shunt_diff + p09_diff, 0.0f, 0.95f);
         _engine->SetDelayDiffusion(diffusion_amt);
 
-        // P07 radio whine
+        // P07 radio whine:
+        // Only responds to air theremin if holding P08 (Ground)!
+        // Otherwise, soft touch whines gently; pressing harder triggers runaway feedback.
+        // Muted when S30 is low.
         float p07_touch = bender.Pressure(7);
-        float p07_prox  = touch.air().PadProximity(7);
-        float p07_presence = p07_touch + p07_prox;
-        if (p07_presence > 0.02f) {
+        bool holding_p08 = (bender.Pressure(8) > 0.03f) || (bender.Conductance(7, 8) > 0.05f);
+        float p07_air = 0.0f;
+        if (holding_p08) {
+            float raw_prox = touch.air().PadProximity(7);
+            p07_air = daisysp::fclamp((raw_prox - 0.08f) / 0.80f, 0.0f, 1.0f);
+        }
+
+        float p07_soft = daisysp::fclamp((p07_touch - 0.015f) / 0.985f, 0.0f, 1.0f);
+        float p07_presence = p07_soft + p07_air;
+        if (p07_presence > 0.01f && gen_drive > 0.001f) {
             float base_rf = 293.66f * FastPow2(clock_val * 4.0f);
-            float rf_freq = base_rf / (1.0f + p07_touch * 3.5f + p07_prox * 1.5f);
-            float rf_amp  = daisysp::fclamp(p07_touch * 0.035f + p07_prox * 0.020f, 0.0f, 0.05f);
+            float rf_freq = base_rf / (1.0f + p07_soft * 3.5f + p07_air * 1.5f);
+            float rf_amp  = daisysp::fclamp(p07_soft * 0.035f + p07_air * 0.020f, 0.0f, 0.05f) * gen_drive;
             _engine->SetWhine(rf_amp, rf_freq);
         } else {
             _engine->SetWhine(0.0f, 1200.0f);
@@ -362,8 +409,12 @@ private:
         bool a_up = touch.switches().IsAUp();
         _engine->SetDelayFreeze(a_up);
 
-        // P07 feedback bridges to filter and starve (active when touched)
-        float cond_delay_feed = std::max(bender.Conductance(7, 5) * 0.35f, bender.Pressure(7) * 0.20f);
+        // P07 feedback bridges to filter and starve: only engages when pressing down HARD (> 0.45 pressure) or bridging.
+        // Scaled by S34 feedback knob so feedback level is controllable and prevents runaway screeching.
+        float p07_touch = bender.Pressure(7);
+        float p07_hard = daisysp::fclamp((p07_touch - 0.45f) / 0.55f, 0.0f, 1.0f);
+        float fb_gain = daisysp::fclamp(_current_fb * 1.05f, 0.0f, 1.0f);
+        float cond_delay_feed = std::max(bender.Conductance(7, 5) * 0.35f, p07_hard * 0.35f) * fb_gain;
         _engine->SetBridgeGain(BridgeId::DelayToFilterL, cond_delay_feed);
         _engine->SetBridgeGain(BridgeId::DelayToFilterR, cond_delay_feed);
         _engine->SetBridgeGain(BridgeId::DelayToCutoff, bender.Conductance(7, 1) * 1.1f + cond_1_9 * 0.8f);
@@ -477,6 +528,7 @@ private:
     }
 
     BendsEngine* _engine{nullptr};
+    float _prev_p01{0.0f};
     float _prev_p02{0.0f};
     float _prev_p09{0.0f};
     uint32_t _p02_strike_cooldown{0};
@@ -488,6 +540,7 @@ private:
     MusicalTuning::ScaleSnapper _drone_scale_snap;
     float _current_res{0.05f};
     float _current_cutoff{1000.0f};
+    float _current_fb{0.35f};
     float _current_starve{0.0f};
     float _smooth_s33{0.3f};
     float _last_stable_s33{0.3f};

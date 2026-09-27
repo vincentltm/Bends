@@ -37,8 +37,11 @@ public:
     }
 
     void Process(float in_l, float in_r, float& out_l, float& out_r) override {
-        float in_mono = 0.5f * (in_l + in_r);
         float total_drive = daisysp::fclamp(_drive + _aux_in[1], 0.0f, 2.0f);
+        // Internal generator drive scaling: when S30 Drive is turned low, internal generators are muted,
+        // leaving pure clean external input audio passing through to the filters, delay, and bends!
+        float gen_drive = daisysp::fclamp((total_drive - 0.03f) / 0.97f, 0.0f, 2.0f);
+
         // Voltage starve on input audio: full headroom above ~half (0.52), engages smoothly below half
         float input_vcc = 1.0f;
         if (_vcc < 0.52f) {
@@ -46,8 +49,26 @@ public:
             input_vcc = t * t * (3.0f - 2.0f * t);
         }
         float dry_headroom = 0.15f + 0.85f * input_vcc;
-        float preamp_in = in_mono * (1.0f + total_drive * 3.5f);
-        float ext_sig = (preamp_in / (1.0f + (0.35f / dry_headroom) * std::abs(preamp_in))) * dry_headroom;
+
+        // Handle mono vs stereo external input:
+        // If in_r is silent or floating noise (< -55dB) while in_l has signal, duplicate in_l
+        // to prevent open-pin EMI noise from polluting the sound and restore mono balance.
+        float clean_r = in_r;
+        if (std::abs(in_r) < 0.0018f && std::abs(in_l) > 0.003f) {
+            clean_r = in_l;
+        }
+
+        float ext_sig_l, ext_sig_r;
+        if (total_drive < 0.05f && _vcc >= 0.52f) {
+            // Clean linear passthrough for external audio: zero compression or distortion
+            ext_sig_l = in_l;
+            ext_sig_r = clean_r;
+        } else {
+            float preamp_in_l = in_l * (1.0f + total_drive * 3.5f);
+            float preamp_in_r = clean_r * (1.0f + total_drive * 3.5f);
+            ext_sig_l = (preamp_in_l / (1.0f + (0.35f / dry_headroom) * std::abs(preamp_in_l))) * dry_headroom;
+            ext_sig_r = (preamp_in_r / (1.0f + (0.35f / dry_headroom) * std::abs(preamp_in_r))) * dry_headroom;
+        }
 
         float starve = daisysp::fclamp((0.52f - _vcc) * 1.9230769f, 0.0f, 1.0f);
 
@@ -74,19 +95,20 @@ public:
         float main_s = ReadStarvedSine(_phase_main, starve) * 0.22f;
         _sub_sample  = ReadStarvedSine(_phase_sub, starve * 0.75f) * 0.14f;
 
-        float osc_gain = total_drive * 1.6f;
+        float osc_gain = gen_drive * 1.6f;
         float raw_osc = (main_s + _sub_sample * _sub_level) * _gate_amp_smooth * osc_gain;
 
         // Low-pass gate controlled by pad pressure
-        float lpg_cutoff = 30.0f + _gate_amp_smooth * daisysp::fclamp(total_drive * 8500.0f, 1000.0f, 8500.0f);
+        float lpg_cutoff = 30.0f + _gate_amp_smooth * daisysp::fclamp(gen_drive * 8500.0f, 1000.0f, 8500.0f);
         float lpg_alpha = daisysp::fclamp(lpg_cutoff * (6.2831853f / _sample_rate), 0.001f, 0.95f);
         _lpg_filter += lpg_alpha * (raw_osc - _lpg_filter);
         if (std::abs(_lpg_filter) < 1.0e-7f) _lpg_filter = 0.0f;
         float osc_sig = _lpg_filter;
 
-        float out = ext_sig + osc_sig;
-        out_l = out;
-        out_r = out;
+        float out_left = ext_sig_l + osc_sig;
+        float out_right = ext_sig_r + osc_sig;
+        out_l = out_left;
+        out_r = out_right;
 
         _aux_in[0] = 0.0f;
         _aux_in[1] = 0.0f;

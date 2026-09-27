@@ -21,6 +21,7 @@ public:
     void Reset() override {
         _pulse_phase = 0.0f;
         _poly_phase = 0.0f;
+        _step_counter = 0;
         _impulse_decay = 0.0f;
         _impulse_phase = 0.0f;
         _rng = 424242u;
@@ -37,6 +38,7 @@ public:
         _time_leak = 0.0f;
         _delay_time_sec = 0.25f;
         _drone_freq = 110.0f;
+        _geiger_bend = 0.0f;
         _hold_delay = 0;
     }
 
@@ -67,6 +69,7 @@ public:
     void SetTimeLeak(float val)     { _time_leak = daisysp::fclamp(val, 0.0f, 1.0f); }
     void SetDelayTime(float sec)    { _delay_time_sec = std::max(0.0008f, sec); }
     void SetDroneFreq(float hz)     { _drone_freq = std::max(10.0f, hz); }
+    void SetGeigerBend(float val)   { _geiger_bend = daisysp::fclamp(val, 0.0f, 1.0f); }
 
     void Process(float in_l, float in_r, float& out_l, float& out_r) override {
         float out = 0.0f;
@@ -93,69 +96,103 @@ public:
             } else {
                 float norm_p = daisysp::fclamp((_pressure - 0.018f) / 0.982f, 0.0f, 1.0f);
                 float rate_curve = _rate * _rate;
-                float min_rate = 0.15f + rate_curve * 2.2f;
-                // Responsive acceleration on light metal contact
-                float pressure_accel = norm_p * (0.25f + 0.75f * norm_p);
-                float base_rate = min_rate + pressure_accel * (4.0f + _rate * 26.0f);
+                // Slower, more spacious base tempo: 0.25 Hz (15 BPM) to 2.0 Hz (120 BPM)
+                float min_rate = 0.25f + rate_curve * 1.75f;
+                // Responsive acceleration on light metal contact, capped at ~5.2 Hz max
+                float pressure_accel = norm_p * (0.30f + 0.70f * norm_p);
+                float base_rate = min_rate + pressure_accel * 3.2f;
 
-                // Delay subdivision sync (smooth crossfade with conductance)
+                // Delay subdivision sync: locked to musical echoes, clamped to <= 5.0 Hz
                 if (_delay_sync > 0.02f) {
-                    float delay_hz = 1.0f / std::max(0.008f, _delay_time_sec);
-                    float subdiv = static_cast<float>(1 << static_cast<int>(norm_p * 4.0f));
-                    float synced_rate = delay_hz * subdiv;
+                    float delay_hz = 1.0f / std::max(0.12f, _delay_time_sec);
+                    float synced_rate = daisysp::fclamp(delay_hz * 0.5f, 0.35f, 5.0f);
                     base_rate = base_rate * (1.0f - _delay_sync) + synced_rate * _delay_sync;
                 }
 
-                // Drone pitch tracking
+                // Drone pitch tracking (very gentle shift)
                 if (_drone_sync > 0.05f) {
-                    float drone_rate = _drone_freq * 0.01f * _drone_sync;
+                    float drone_rate = _drone_freq * 0.003f * _drone_sync;
                     base_rate += drone_rate;
                 }
 
                 // Time knob leak
                 if (_time_leak > 0.01f) {
-                    base_rate *= (1.0f - _time_leak * 0.4f);
+                    base_rate *= (1.0f - _time_leak * 0.35f);
+                }
+                base_rate = daisysp::fclamp(base_rate, 0.15f, 5.5f);
+
+                // Continuum depth:
+                // Zone 1 (depth < 0.15): Steady Metronome Heartbeat (high Vcc, unbridged)
+                // Zone 2 (0.15 <= depth < 0.65): Ordered Polyrhythms / Groove (mid Vcc, pad bends)
+                // Zone 3 (depth >= 0.65): Sparse Geiger Counter particle clicks (deep brownout, ground faults)
+                float depth = daisysp::fclamp(_starve * 1.25f + _geiger_bend * 0.85f + _poly_mod * 0.50f, 0.0f, 1.0f);
+                float eff_rate = base_rate;
+
+                if (depth < 0.15f) {
+                    // Zone 1: Pure rock-solid metronome heartbeat
+                    _poly_phase = 0.0f;
+                } else if (depth < 0.65f) {
+                    // Zone 2: Ordered Polyrhythms / Grooving syncopation
+                    float zone2_norm = (depth - 0.15f) * 2.0f; // 0.0 to 1.0
+
+                    // Organic human swing microtiming (+/- 7%)
+                    _rng = _rng * 1664525u + 1013904223u;
+                    float swing = (static_cast<float>(static_cast<int32_t>(_rng)) * 2.3283e-10f) * (zone2_norm * 0.12f);
+                    eff_rate = std::max(0.2f, base_rate * (1.0f + swing));
+
+                    // Secondary polyrhythm counter-pulse (3:2 hemiola or 4:3 polyrhythm)
+                    float poly_ratio = (depth < 0.40f) ? 1.5f : 1.3333333f;
+                    _poly_phase += (base_rate * poly_ratio / _sample_rate);
+                    if (_poly_phase >= 1.0f) {
+                        _poly_phase -= 1.0f;
+                        float counter_vel = 0.30f + 0.25f * zone2_norm;
+                        _impulse_decay = std::max(_impulse_decay, counter_vel);
+                        _impulse_phase = 0.0f;
+                    }
+                } else {
+                    // Zone 3: Breakdown into authentic sparse Geiger counter discharges
+                    float geiger_norm = (depth - 0.65f) / 0.35f;
+                    _rng = _rng * 1664525u + 1013904223u;
+
+                    // Sparse Poisson Geiger particle discharges (low density: 2-8 clicks/sec max)
+                    uint32_t geiger_thresh = static_cast<uint32_t>(geiger_norm * 5.0f);
+                    if ((_rng & 0x7FFF) < geiger_thresh) {
+                        float particle_vel = 0.25f + (static_cast<float>(_rng & 0x7F) / 127.0f) * 0.40f;
+                        _impulse_decay = std::max(_impulse_decay, particle_vel);
+                        _impulse_phase = 0.0f;
+                    }
+                    _poly_phase = 0.0f;
                 }
 
-                // Jitter when starved
-                _rng = _rng * 1664525u + 1013904223u;
-                float jitter = (static_cast<float>(static_cast<int32_t>(_rng)) * 2.3283e-10f) * (_starve * 0.45f);
-                float eff_rate = base_rate * (1.0f + jitter);
-
+                // Advance primary pulse
                 _pulse_phase += (eff_rate / _sample_rate);
                 if (_pulse_phase >= 1.0f) {
                     _pulse_phase -= 1.0f;
-                    _impulse_decay = std::max(_impulse_decay, 0.60f + norm_p * 0.60f);
-                    _impulse_phase = 0.0f;
+                    _step_counter = (_step_counter + 1) & 0x0F;
 
-                    // Ground fault: drop beats randomly
-                    if (_ground_fault > 0.08f) {
+                    bool skip_beat = false;
+                    if (depth >= 0.65f) {
+                        // In Geiger zone, the main pulse is increasingly erratic/broken
+                        float geiger_norm = (depth - 0.65f) / 0.35f;
+                        if ((static_cast<float>(_rng & 0xFF) / 255.0f) < geiger_norm * 0.65f) {
+                            skip_beat = true;
+                        }
+                    } else if (_ground_fault > 0.08f) {
                         _rng = _rng * 1664525u + 1013904223u;
-                        float skip_prob = _ground_fault * 0.45f;
-                        if ((static_cast<float>(_rng & 0xFF) / 255.0f) < skip_prob) {
-                            _impulse_decay = 0.0f;
+                        if ((static_cast<float>(_rng & 0xFF) / 255.0f) < _ground_fault * 0.45f) {
+                            skip_beat = true;
                         }
                     }
-                }
 
-                // 3:2 polyrhythm when bridged to other pads
-                if (_poly_mod > 0.05f) {
-                    _poly_phase += (base_rate * 1.5f / _sample_rate);
-                    if (_poly_phase >= 1.0f) {
-                        _poly_phase -= 1.0f;
-                        _impulse_decay = std::max(_impulse_decay, 0.45f * _poly_mod);
+                    if (!skip_beat) {
+                        // Downbeats accented in Zone 2 for ordered groove
+                        float beat_vel = 0.65f + norm_p * 0.45f;
+                        if (depth >= 0.15f && depth < 0.65f && (_step_counter & 0x03) != 0) {
+                            beat_vel *= 0.75f; // ghost beat on offbeats
+                        }
+                        _impulse_decay = std::max(_impulse_decay, beat_vel);
                         _impulse_phase = 0.0f;
-
-                        if (_ground_fault > 0.08f) {
-                            _rng = _rng * 1664525u + 1013904223u;
-                            float skip_prob = _ground_fault * 0.45f;
-                            if ((static_cast<float>(_rng & 0xFF) / 255.0f) < skip_prob) {
-                                _impulse_decay = 0.0f;
-                            }
-                        }
                     }
-                } else {
-                    _poly_phase = 0.0f;
                 }
             }
         } else {
@@ -165,8 +202,10 @@ public:
         }
 
         // Drive scaling and filter blend (redirect energy to filter ping)
+        // When S30 Drive is low, Click/Pulse generator is completely muted for pure external audio processing
         float direct_gain = 1.0f - _filter_blend * 0.7f;
-        float scaled = out * daisysp::fclamp(0.25f + _drive * 1.5f, 0.0f, 2.0f) * direct_gain;
+        float drive_gain = daisysp::fclamp((_drive - 0.03f) / 0.97f * 2.0f, 0.0f, 2.0f);
+        float scaled = out * drive_gain * direct_gain;
         out_l = scaled;
         out_r = scaled;
     }
@@ -232,7 +271,9 @@ private:
     float _time_leak{0.0f};
     float _delay_time_sec{0.25f};
     float _drone_freq{110.0f};
+    float _geiger_bend{0.0f};
     uint32_t _hold_delay{0};
+    uint8_t  _step_counter{0};
 };
 
 } // namespace bends

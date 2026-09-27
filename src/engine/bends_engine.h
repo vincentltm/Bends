@@ -5,6 +5,7 @@
 #include "click_module.h"
 #include "hum_module.h"
 #include "radio_module.h"
+#include "corrupt_module.h"
 #include "filter_module.h"
 #include "starve_module.h"
 #include "delay_module.h"
@@ -15,25 +16,26 @@
 namespace bends {
 
 enum class ModuleId : uint8_t {
-    Drone  = 0,
-    Click  = 1,
-    Hum    = 2,
-    Radio  = 3,
-    Filter = 4,
-    Starve = 5,
-    Delay  = 6
+    Drone   = 0,
+    Click   = 1,
+    Hum     = 2,
+    Radio   = 3,
+    Filter  = 4,
+    Starve  = 5,
+    Delay   = 6,
+    Corrupt = 7
 };
 
 enum class BridgeId : uint8_t {
-    DelayToFilterL    = 12,
-    DelayToFilterR    = 13,
-    FilterBpToCutoff  = 14,
-    DelayToCutoff     = 15,
-    DroneToDelayClock = 16,
-    DelayToStarveL    = 17,
-    DelayToStarveR    = 18,
-    ClickToDelayL     = 19,
-    ClickToDelayR     = 20
+    DelayToFilterL    = 14,
+    DelayToFilterR    = 15,
+    FilterBpToCutoff  = 16,
+    DelayToCutoff     = 17,
+    DroneToDelayClock = 18,
+    DelayToStarveL    = 19,
+    DelayToStarveR    = 20,
+    ClickToDelayL     = 21,
+    ClickToDelayR     = 22
 };
 
 class BendsEngine {
@@ -43,43 +45,54 @@ public:
         _block_size = block_size;
 
         _circuit.Init(sample_rate, block_size);
-        _circuit.RegisterModule(ModuleId::Drone,  &_mod_drone);
-        _circuit.RegisterModule(ModuleId::Click,  &_mod_click);
-        _circuit.RegisterModule(ModuleId::Hum,    &_mod_hum);
-        _circuit.RegisterModule(ModuleId::Radio,  &_mod_radio);
-        _circuit.RegisterModule(ModuleId::Filter, &_mod_filter);
-        _circuit.RegisterModule(ModuleId::Starve, &_mod_starve);
-        _circuit.RegisterModule(ModuleId::Delay,  &_mod_delay);
+        _circuit.RegisterModule(ModuleId::Drone,   &_mod_drone);
+        _circuit.RegisterModule(ModuleId::Click,   &_mod_click);
+        _circuit.RegisterModule(ModuleId::Hum,     &_mod_hum);
+        _circuit.RegisterModule(ModuleId::Radio,   &_mod_radio);
+        _circuit.RegisterModule(ModuleId::Filter,  &_mod_filter);
+        _circuit.RegisterModule(ModuleId::Starve,  &_mod_starve);
+        _circuit.RegisterModule(ModuleId::Delay,   &_mod_delay);
+        _circuit.RegisterModule(ModuleId::Corrupt, &_mod_corrupt);
 
         // Primary signal chain: Sources -> Filter -> Starve -> Delay
-        _circuit.Connect({ModuleId::Drone,  Port::MainL, ModuleId::Filter, Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Drone,  Port::MainR, ModuleId::Filter, Port::MainR, 1.0f});
-        _circuit.Connect({ModuleId::Click,  Port::MainL, ModuleId::Filter, Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Click,  Port::MainR, ModuleId::Filter, Port::MainR, 1.0f});
-        _circuit.Connect({ModuleId::Hum,    Port::MainL, ModuleId::Filter, Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Hum,    Port::MainR, ModuleId::Filter, Port::MainR, 1.0f});
-        _circuit.Connect({ModuleId::Radio,  Port::MainL, ModuleId::Filter, Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Radio,  Port::MainR, ModuleId::Filter, Port::MainR, 1.0f});
-        _circuit.Connect({ModuleId::Filter, Port::MainL, ModuleId::Starve, Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Filter, Port::MainR, ModuleId::Starve, Port::MainR, 1.0f});
-        _circuit.Connect({ModuleId::Starve, Port::MainL, ModuleId::Delay,  Port::MainL, 1.0f});
-        _circuit.Connect({ModuleId::Starve, Port::MainR, ModuleId::Delay,  Port::MainR, 1.0f});
+        _circuit.Connect({ModuleId::Drone,   Port::MainL, ModuleId::Filter, Port::MainL, 1.0f}); // 0
+        _circuit.Connect({ModuleId::Drone,   Port::MainR, ModuleId::Filter, Port::MainR, 1.0f}); // 1
+        _circuit.Connect({ModuleId::Click,   Port::MainL, ModuleId::Filter, Port::MainL, 1.0f}); // 2
+        _circuit.Connect({ModuleId::Click,   Port::MainR, ModuleId::Filter, Port::MainR, 1.0f}); // 3
+        _circuit.Connect({ModuleId::Hum,     Port::MainL, ModuleId::Filter, Port::MainL, 1.0f}); // 4
+        _circuit.Connect({ModuleId::Hum,     Port::MainR, ModuleId::Filter, Port::MainR, 1.0f}); // 5
+        _circuit.Connect({ModuleId::Radio,   Port::MainL, ModuleId::Filter, Port::MainL, 1.0f}); // 6
+        _circuit.Connect({ModuleId::Radio,   Port::MainR, ModuleId::Filter, Port::MainR, 1.0f}); // 7
+        _circuit.Connect({ModuleId::Corrupt, Port::MainL, ModuleId::Filter, Port::MainL, 1.0f}); // 8
+        _circuit.Connect({ModuleId::Corrupt, Port::MainR, ModuleId::Filter, Port::MainR, 1.0f}); // 9
+        _circuit.Connect({ModuleId::Filter,  Port::MainL, ModuleId::Starve, Port::MainL, 1.0f}); // 10
+        _circuit.Connect({ModuleId::Filter,  Port::MainR, ModuleId::Starve, Port::MainR, 1.0f}); // 11
+        _circuit.Connect({ModuleId::Starve,  Port::MainL, ModuleId::Delay,  Port::MainL, 1.0f}); // 12
+        _circuit.Connect({ModuleId::Starve,  Port::MainR, ModuleId::Delay,  Port::MainR, 1.0f}); // 13
 
         // Virtual circuit bend bridges (default gain = 0.0f, bridged via touch)
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainL, 0.0f}); // 12: Delay to Filter L
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainR, 0.0f}); // 13: Delay to Filter R
-        _circuit.Connect({ModuleId::Filter, Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 14: Filter BP to Cutoff
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 15: Delay to Cutoff
-        _circuit.Connect({ModuleId::Drone,  Port::MainL, ModuleId::Delay,  Port::Aux0,  0.0f}); // 16: Drone to Delay Clock
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Starve, Port::MainL, 0.0f}); // 17: Delay to Starve L
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Starve, Port::MainR, 0.0f}); // 18: Delay to Starve R
-        _circuit.Connect({ModuleId::Click,  Port::MainL, ModuleId::Delay,  Port::MainL, 0.0f}); // 19: Direct Click to Delay L
-        _circuit.Connect({ModuleId::Click,  Port::MainR, ModuleId::Delay,  Port::MainR, 0.0f}); // 20: Direct Click to Delay R
+        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainL, 0.0f}); // 14: Delay to Filter L
+        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainR, 0.0f}); // 15: Delay to Filter R
+        _circuit.Connect({ModuleId::Filter, Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 16: Filter BP to Cutoff
+        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 17: Delay to Cutoff
+        _circuit.Connect({ModuleId::Drone,  Port::MainL, ModuleId::Delay,  Port::Aux0,  0.0f}); // 18: Drone to Delay Clock
+        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Starve, Port::MainL, 0.0f}); // 19: Delay to Starve L
+        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Starve, Port::MainR, 0.0f}); // 20: Delay to Starve R
+        _circuit.Connect({ModuleId::Click,  Port::MainL, ModuleId::Delay,  Port::MainL, 0.0f}); // 21: Direct Click to Delay L
+        _circuit.Connect({ModuleId::Click,  Port::MainR, ModuleId::Delay,  Port::MainR, 0.0f}); // 22: Direct Click to Delay R
 
         _circuit.Compile();
 
         _limiter_l.Init();
         _limiter_r.Init();
+        _in_dc_l.Init(sample_rate);
+        _in_dc_r.Init(sample_rate);
+
+        // Boot settling & fade-in: 180ms silent DC block stabilization + 220ms smooth fade-in
+        _boot_total_samples = static_cast<uint32_t>(sample_rate * 0.40f);
+        _boot_samples_processed = 0;
+        _reset_fade_samples = 0;
+        _reset_samples_processed = 0;
     }
 
     void ProcessBlock(const float* in_l, const float* in_r,
@@ -112,6 +125,8 @@ public:
         daisysp::fonepole(_smooth_delay_reverse,    _target_delay_reverse,    0.12f);
         daisysp::fonepole(_smooth_delay_reverse_mod,_target_delay_reverse_mod,0.05f);
         daisysp::fonepole(_smooth_delay_diffusion,  _target_delay_diffusion,  0.015f);
+        daisysp::fonepole(_smooth_corrupt_vol,      _target_corrupt_vol,      0.05f);
+        daisysp::fonepole(_smooth_corrupt_pressure, _target_corrupt_pressure, 0.05f);
 
         // Rail sag from memory glitch
         float glitch_sag = _mod_delay.GetGlitchSag();
@@ -131,6 +146,7 @@ public:
         float eff_radio_freq = _target_radio_freq;
         float eff_hum_buzz = _target_hum_buzz;
         float eff_hum_gnd  = _target_hum_gnd;
+        float eff_corrupt_vol = _smooth_corrupt_vol;
 
         if (_floating_active) {
             if (_warmup_delay > 0) {
@@ -155,12 +171,9 @@ public:
                 eff_hum_buzz = std::max(_target_hum_buzz, (0.028f + 0.012f * drift_sin1) * _warmup_progress);
                 eff_hum_gnd  = std::max(_target_hum_gnd, (0.020f + 0.008f * drift_sin2) * _warmup_progress);
 
-                // Deep warm analog drone body (36.7 Hz - 55 Hz sub-octave) so reset hold is full, fat, and musical
-                eff_pitch = 36.71f + 18.0f * _warmup_progress + drift_sin1 * 3.0f;
+                // Deep warm analog drone body (36.7 Hz sub-octave) - rock solid stable pitch, NO slow wandering
+                eff_pitch = 36.71f;
                 eff_vca = std::max(_smooth_vca, (0.16f + 0.04f * drift_sin2) * _warmup_progress);
-
-                // Microtonal pitch drift up to +/- 18 cents (0.015 octaves)
-                float pitch_drift_oct = (drift_sin1 * 0.010f + drift_sin2 * 0.005f) * _warmup_progress;
 
                 // Cutoff drift: breathes slowly like thermal expansion
                 float cutoff_drift_oct = _floating_cutoff_base + (drift_sin2 * 0.35f + drift_sin3 * 0.20f) * _warmup_progress;
@@ -218,16 +231,15 @@ public:
 
                     case UninitializedState::SputteringRail:
                         // Sub-harmonic motorboat throb (18–32 Hz)
-                        eff_pitch = 18.0f + 14.0f * _warmup_progress + drift_sin1 * 3.0f;
+                        eff_pitch = 18.0f + 14.0f * _warmup_progress;
                         eff_vca = std::max(_smooth_vca, 0.12f * _warmup_progress);
                         eff_vcc = daisysp::fclamp(_smooth_vcc - 0.45f * _warmup_progress, 0.03f, 0.40f);
                         break;
 
-                    case UninitializedState::RadioWhistle:
+                    case UninitializedState::CorruptedMemory:
                         eff_vca = _smooth_vca;
-                        eff_radio_amp = std::max(_target_radio_amp, 0.028f * _warmup_progress);
-                        eff_radio_freq = 1100.0f + 700.0f * (drift_sin1 * 0.5f + 0.5f);
-                        eff_res = daisysp::fclamp(_smooth_res + 0.18f * _warmup_progress, 0.0f, 0.88f);
+                        eff_corrupt_vol = std::max(_smooth_corrupt_vol, 0.08f * _warmup_progress);
+                        eff_feedback = daisysp::fclamp(_smooth_feedback * 0.70f + 0.15f * _warmup_progress, 0.0f, 0.65f);
                         break;
 
                     case UninitializedState::MemoryGhost:
@@ -236,7 +248,7 @@ public:
                         break;
 
                     case UninitializedState::SingingHarmonic:
-                        eff_pitch = sagged_pitch * _floating_pitch_ratio * _floating_detune * FastPow2(pitch_drift_oct);
+                        eff_pitch = 55.0f * _floating_pitch_ratio;
                         eff_vca = std::max(_smooth_vca, _floating_ghost_vca * _warmup_progress);
                         break;
                 }
@@ -268,6 +280,11 @@ public:
         _mod_radio.SetParam(0, eff_radio_freq);
         _mod_radio.SetParam(1, eff_radio_amp);
 
+        _mod_corrupt.SetParam(0, eff_corrupt_vol);
+        _mod_corrupt.SetParam(1, _smooth_corrupt_pressure);
+        _mod_corrupt.SetParam(2, _smooth_pitch);
+        _mod_corrupt.SetDrive(_smooth_drive);
+
         _mod_filter.SetParam(0, eff_cutoff);
         _mod_filter.SetParam(1, eff_res);
         _mod_filter.SetParam(2, _smooth_drive);
@@ -291,7 +308,15 @@ public:
 
         _mod_delay.PrepareBlock(size);
 
-        _circuit.ProcessBlock(in_l, in_r, out_l, out_r, size);
+        float clean_in_l[64] = {0.0f};
+        float clean_in_r[64] = {0.0f};
+        size_t n = (size <= 64) ? size : 64;
+        for (size_t s = 0; s < n; ++s) {
+            clean_in_l[s] = _in_dc_l.Process(in_l[s]);
+            clean_in_r[s] = _in_dc_r.Process(in_r[s]);
+        }
+
+        _circuit.ProcessBlock(clean_in_l, clean_in_r, out_l, out_r, size);
 
         // Signal energy creates gentle rail breathing and audio peak tracking
         float signal_energy = 0.0f;
@@ -311,9 +336,29 @@ public:
         _limiter_l.ProcessBlock(out_l, size, 1.0f);
         _limiter_r.ProcessBlock(out_r, size, 1.0f);
 
+        // Settle & smooth fade-in on boot to eliminate hardware power-on DC/codec click noise
+        float block_fade = 1.0f;
+        if (_boot_samples_processed < _boot_total_samples) {
+            uint32_t settle_samples = static_cast<uint32_t>(_sample_rate * 0.18f); // 180ms dead mute settle
+            uint32_t fade_samples   = static_cast<uint32_t>(_sample_rate * 0.22f); // 220ms smooth fade-in
+            if (_boot_samples_processed < settle_samples) {
+                block_fade = 0.0f;
+            } else {
+                float progress = static_cast<float>(_boot_samples_processed - settle_samples) / static_cast<float>(fade_samples);
+                progress = daisysp::fclamp(progress, 0.0f, 1.0f);
+                block_fade = 0.5f * (1.0f - cosf(progress * 3.14159265f));
+            }
+            _boot_samples_processed += size;
+        } else if (_reset_samples_processed < _reset_fade_samples) {
+            float progress = static_cast<float>(_reset_samples_processed) / static_cast<float>(_reset_fade_samples);
+            progress = daisysp::fclamp(progress, 0.0f, 1.0f);
+            block_fade = 0.5f * (1.0f - cosf(progress * 3.14159265f));
+            _reset_samples_processed += size;
+        }
+
         for (size_t i = 0; i < size; ++i) {
-            out_l[i] = daisysp::fclamp(out_l[i], -0.95f, 0.95f);
-            out_r[i] = daisysp::fclamp(out_r[i], -0.95f, 0.95f);
+            out_l[i] = daisysp::fclamp(out_l[i] * block_fade, -0.95f, 0.95f);
+            out_r[i] = daisysp::fclamp(out_r[i] * block_fade, -0.95f, 0.95f);
         }
     }
 
@@ -363,14 +408,6 @@ public:
         _pending_reset = true;
     }
 
-    void SeedUninitializedRam(uint32_t seed) {
-        _floating_active = false;
-        _warmup_progress = 0.0f;
-        _warmup_delay = 0;
-        _mod_delay.SeedUninitializedRam(seed);
-        _target_delay_freeze = true;
-    }
-
 private:
     void ExecuteFloatingState() {
         _floating_active = true;
@@ -392,6 +429,9 @@ private:
         // 3. Roll one of 5 distinct stochastic uninitialized circuit personalities
         uint32_t roll = (_floating_rng >> 4) % 5;
         _uninit_state = static_cast<UninitializedState>(roll);
+        if (_uninit_state == UninitializedState::CorruptedMemory) {
+            _mod_corrupt.TriggerNewPersonality();
+        }
 
         // Seed random leak rates & phases
         _leak_accum = 0.0f;
@@ -444,6 +484,7 @@ private:
         _floating_rng = _floating_rng * 1664525u + 1013904223u;
         _mod_delay.Reseed(_floating_rng);
         _mod_click.Reseed(_floating_rng);
+        _mod_corrupt.Reset();
 
         // 4. Clear transient states
         _target_delay_freeze = false;
@@ -452,8 +493,16 @@ private:
         _target_delay_diffusion = 0.0f;
         _smooth_delay_diffusion = 0.0f;
         _target_radio_amp = 0.0f;
+        _target_corrupt_vol = 0.0f;
+        _smooth_corrupt_vol = 0.0f;
+        _target_corrupt_pressure = 0.0f;
+        _smooth_corrupt_pressure = 0.0f;
         _limiter_l.Init();
         _limiter_r.Init();
+
+        // Smooth 40ms de-click fade-in on reset
+        _reset_fade_samples = static_cast<uint32_t>(_sample_rate * 0.04f);
+        _reset_samples_processed = 0;
     }
 
 public:
@@ -469,6 +518,19 @@ public:
     void SetClickGroundFault(float val) { _mod_click.SetGroundFault(val); }
     void SetClickDroneSync(float val)   { _mod_click.SetDroneSync(val); }
     void SetClickTimeLeak(float val)    { _mod_click.SetTimeLeak(val); }
+    void SetClickGeigerBend(float val)  { _mod_click.SetGeigerBend(val); }
+
+    void SetCorruptVolume(float val)       { _target_corrupt_vol = val; }
+    void SetCorruptPressure(float val)     { _target_corrupt_pressure = val; }
+    void SetCorruptPitch(float val)        { _mod_corrupt.SetPitch(val); }
+    void SetCorruptClickMod(float val)     { _mod_corrupt.SetClickMod(val); }
+    void SetCorruptReverseMod(float val)   { _mod_corrupt.SetReverseMod(val); }
+    void SetCorruptClockMod(float val)     { _mod_corrupt.SetClockMod(val); }
+    void SetCorruptDiffusionMod(float val) { _mod_corrupt.SetDiffusionMod(val); }
+    void SetCorruptGlitchMod(float val)    { _mod_corrupt.SetGlitchMod(val); }
+    void SetCorruptStarveMod(float val)    { _mod_corrupt.SetStarveMod(val); }
+    void SetCorruptDroneMod(float val)     { _mod_corrupt.SetDroneMod(val); }
+    void TriggerCorruptPersonality()       { _mod_corrupt.TriggerNewPersonality(); }
 
     void SetHum(float buzz, float hum)   { _target_hum_buzz = buzz; _target_hum_gnd = hum; }
     void SetWhine(float amp, float freq) { _target_radio_amp = amp; _target_radio_freq = freq; }
@@ -490,17 +552,20 @@ private:
     float _sample_rate{48000.0f};
     uint16_t _block_size{64};
 
-    Circuit      _circuit;
-    DroneModule  _mod_drone;
-    ClickModule  _mod_click;
-    HumModule    _mod_hum;
-    RadioModule  _mod_radio;
-    FilterModule _mod_filter;
-    StarveModule _mod_starve;
-    DelayModule  _mod_delay;
+    Circuit       _circuit;
+    DroneModule   _mod_drone;
+    ClickModule   _mod_click;
+    HumModule     _mod_hum;
+    RadioModule   _mod_radio;
+    CorruptModule _mod_corrupt;
+    FilterModule  _mod_filter;
+    StarveModule  _mod_starve;
+    DelayModule   _mod_delay;
 
     daisysp::Limiter _limiter_l;
     daisysp::Limiter _limiter_r;
+    daisysp::DcBlock _in_dc_l;
+    daisysp::DcBlock _in_dc_r;
 
     float _target_drive{0.20f},      _smooth_drive{0.20f};
     float _target_pitch{110.0f},     _smooth_pitch{110.0f};
@@ -529,11 +594,13 @@ private:
     float _target_hum_gnd{0.0f};
     float _target_radio_amp{0.0f};
     float _target_radio_freq{1200.0f};
+    float _target_corrupt_vol{0.0f},      _smooth_corrupt_vol{0.0f};
+    float _target_corrupt_pressure{0.0f}, _smooth_corrupt_pressure{0.0f};
 
     enum class UninitializedState : uint8_t {
         StaticClicks = 0,    // Leaky gate / Geiger static discharges bouncing through delay
         SputteringRail = 1,  // Starved power rail / sub-harmonic motorboat throb (18-32 Hz)
-        RadioWhistle = 2,    // High-Z parasitic RF antenna whistle & wind-like resonant filter drift
+        CorruptedMemory = 2, // Corrupted memory grain scan & subtle digital computery chatter
         MemoryGhost = 3,     // Uninitialized memory comb ringing & sporadic microscopic pings
         SingingHarmonic = 4  // Tuned harmonic resonance without pitch glide
     };
@@ -558,6 +625,11 @@ private:
 
     volatile bool _pending_floating{false};
     volatile bool _pending_reset{false};
+
+    uint32_t _boot_total_samples{0};
+    uint32_t _boot_samples_processed{0};
+    uint32_t _reset_fade_samples{0};
+    uint32_t _reset_samples_processed{0};
 };
 
 } // namespace bends

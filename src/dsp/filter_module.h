@@ -102,19 +102,16 @@ public:
             }
         }
 
-        // Input drive saturation with even-harmonic warmth and noise gate
+        // Input drive saturation with even-harmonic warmth (clean linear when drive is low)
         float in_sum = 0.5f * (in_l + in_r) + _ping_impulse;
         _ping_impulse = 0.0f;
 
-        // Noise floor squelch gate: dead silence when idle (< -70 dB)
-        if (std::abs(in_sum) < 0.00035f && _ping_env < 0.001f) {
-            in_sum = 0.0f;
+        float sat_in = in_sum;
+        if (_drive >= 0.05f) {
+            float driven_in = in_sum * _drive_boost;
+            float asym = driven_in + (_drive * 0.15f) * (driven_in * std::abs(driven_in));
+            sat_in = (asym / (1.0f + 0.35f * std::abs(asym))) * _drive_vol_comp;
         }
-
-        // 2nd-order saturation with even harmonics
-        float driven_in = in_sum * _drive_boost;
-        float asym = driven_in + (_drive * 0.15f) * (driven_in * std::abs(driven_in));
-        float sat_in = (asym / (1.0f + 0.35f * std::abs(asym))) * _drive_vol_comp;
 
         _svf.Process(sat_in);
 
@@ -122,21 +119,20 @@ public:
         float band = _svf.Band();
         _band_out = band;
 
-        // Rational soft limiting on the resonant tank
-        float band_sat = (band / (1.0f + 0.32f * band * band)) * _hf_taper;
-        float low_sat  = low / (1.0f + 0.12f * low * low);
-
-        // Retain bass body when resonance is turned up
-        float low_shaped = low_sat * _bass_retain;
-
-        // Vocal formant blend in lowpass mode
-        float main_out = (_mode == 1) ? (band_sat * 1.15f) : (low_shaped + band_sat * _res_bite);
-
-        // Resonance gain compensation to balance perceived level
-        main_out *= _res_gain_comp;
-
-        // Master stage soft clip
-        main_out = daisysp::SoftClip(main_out * 0.95f);
+        float main_out;
+        if (_drive < 0.05f && eff_res < 0.25f && _ping_env < 0.005f) {
+            // Pristine linear response for clean external audio
+            main_out = (_mode == 1) ? band : low;
+            main_out *= _res_gain_comp;
+        } else {
+            // Rational soft limiting on the resonant tank
+            float band_sat = (band / (1.0f + 0.32f * band * band)) * _hf_taper;
+            float low_sat  = low / (1.0f + 0.12f * low * low);
+            float low_shaped = low_sat * _bass_retain;
+            main_out = (_mode == 1) ? (band_sat * 1.15f) : (low_shaped + band_sat * _res_bite);
+            main_out *= _res_gain_comp;
+            main_out = daisysp::SoftClip(main_out * 0.95f);
+        }
 
         out_l = main_out;
         out_r = main_out;
