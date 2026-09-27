@@ -76,30 +76,14 @@ private:
             return;
         }
 
-        if (a_down) {
-            // While held Down: keep Down-to-Freeze gesture timer primed (~350ms in 1ms ticks)
-            _down_to_freeze_counter = 280;
-            if (!_was_a_down) {
-                // Instantly wipe runaway audio & engage chassis bootup drone + clicks + sprinkled memory
-                _engine->EnterFloatingState();
-            }
-        } else {
-            if (_down_to_freeze_counter > 0) {
-                _down_to_freeze_counter--;
-            }
-            if (_was_a_down) {
-                // Released Down position:
-                // If not flipped directly to UP (Freeze), execute clean reset so normal play begins fresh
-                if (!a_up) {
-                    _engine->CleanReset();
-                }
-            }
+        // Switch A Down: Clean reset (kills runaway feedback & clears delay buffers instantly)
+        if (a_down && !_was_a_down) {
+            _engine->CleanReset();
         }
 
         // Switch A Up: Dedicated clean buffer freeze
         if (a_up && !_was_a_up) {
             _engine->SetDelayFreeze(true);
-            _down_to_freeze_counter = 0;
         } else if (!a_up && _was_a_up) {
             _engine->SetDelayFreeze(false);
         }
@@ -483,7 +467,6 @@ private:
         }
         float audio_peak = _engine->GetAudioPeak();
         float vcc = _engine->GetVcc();
-        bool floating = _engine->IsFloatingActive();
 
         // Organic idle breathing wave (~0.22 Hz)
         _led_breath_phase += 0.0018f;
@@ -491,14 +474,7 @@ private:
         float breath = 0.05f + 0.04f * (sinf(_led_breath_phase) * 0.5f + 0.5f);
 
         float target_led = 0.0f;
-        if (floating) {
-            // Warmup pulse
-            float progress = _engine->GetWarmupProgress();
-            float pulse_speed = 0.010f + progress * 0.020f;
-            _led_floating_phase += pulse_speed;
-            if (_led_floating_phase >= 6.2831853f) _led_floating_phase -= 6.2831853f;
-            target_led = 0.08f + 0.50f * (sinf(_led_floating_phase) * 0.5f + 0.5f) + audio_peak * 0.30f;
-        } else if (max_touch > 0.02f || max_prox > 0.08f) {
+        if (max_touch > 0.02f || max_prox > 0.08f) {
             // Touch force response + audio VU pulse
             target_led = 0.12f + max_touch * 0.65f + max_prox * 0.20f + audio_peak * 0.30f;
         } else {
@@ -533,7 +509,6 @@ private:
     uint32_t _p09_strike_cooldown{0};
     bool _was_a_up{false};
     bool _was_a_down{false};
-    uint32_t _down_to_freeze_counter{0};
     bool _first_switch_read{true};
     MusicalTuning::ScaleSnapper _drone_scale_snap;
     float _current_res{0.05f};
@@ -546,7 +521,6 @@ private:
     float _smooth_led_brightness{0.0f};
     float _led_pwm_accum{0.0f};
     float _led_breath_phase{0.0f};
-    float _led_floating_phase{0.0f};
     uint32_t _led_rng{0xACE1};
 };
 

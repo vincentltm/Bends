@@ -101,10 +101,6 @@ public:
             _pending_reset = false;
             ExecuteCleanReset();
         }
-        if (_pending_floating) {
-            _pending_floating = false;
-            ExecuteFloatingState();
-        }
 
         // Block-rate parameter smoothing (750 Hz at 64 samples / 48 kHz)
         daisysp::fonepole(_smooth_drive,        _target_drive,        0.02f);
@@ -147,117 +143,6 @@ public:
         float eff_hum_buzz = _target_hum_buzz;
         float eff_hum_gnd  = _target_hum_gnd;
         float eff_corrupt_vol = _smooth_corrupt_vol;
-
-        if (_floating_active) {
-            if (_warmup_delay > 0) {
-                _warmup_delay--;
-            } else {
-                // Warm-up progress: smoothly ramps up over ~350ms
-                _warmup_progress += 0.0035f * (1.0f - _warmup_progress);
-
-                // Incommensurate drift phases advance (simulate chaotic thermal wandering)
-                _floating_phase1 += 0.00025f;
-                if (_floating_phase1 >= 1.0f) _floating_phase1 -= 1.0f;
-                _floating_phase2 += 0.00042f;
-                if (_floating_phase2 >= 1.0f) _floating_phase2 -= 1.0f;
-                _floating_phase3 += 0.00067f;
-                if (_floating_phase3 >= 1.0f) _floating_phase3 -= 1.0f;
-
-                float drift_sin1 = std::sin(_floating_phase1 * 6.2831853f);
-                float drift_sin2 = std::sin(_floating_phase2 * 6.2831853f);
-                float drift_sin3 = std::sin(_floating_phase3 * 6.2831853f);
-
-                // Shared chassis bootup hum & ground throb across all reset holds
-                eff_hum_buzz = std::max(_target_hum_buzz, (0.028f + 0.012f * drift_sin1) * _warmup_progress);
-                eff_hum_gnd  = std::max(_target_hum_gnd, (0.020f + 0.008f * drift_sin2) * _warmup_progress);
-
-                // Deep warm analog drone body (36.7 Hz sub-octave) - rock solid stable pitch, NO slow wandering
-                eff_pitch = 36.71f;
-                eff_vca = std::max(_smooth_vca, (0.16f + 0.04f * drift_sin2) * _warmup_progress);
-
-                // Cutoff drift: breathes slowly like thermal expansion
-                float cutoff_drift_oct = _floating_cutoff_base + (drift_sin2 * 0.35f + drift_sin3 * 0.20f) * _warmup_progress;
-                eff_cutoff = daisysp::fclamp(sagged_cutoff * FastPow2(cutoff_drift_oct), 30.0f, 11000.0f);
-
-                // Floating rail sag
-                eff_vcc = daisysp::fclamp(_smooth_vcc - _floating_starve_bias * _warmup_progress, 0.02f, 1.0f);
-
-                // Extra singing resonance
-                eff_res = daisysp::fclamp(_smooth_res + _floating_res_boost * _warmup_progress, 0.0f, 0.90f);
-
-                // Leaky capacitor static discharge accumulator
-                _leak_accum += _leak_rate;
-                if (_leak_accum >= 1.0f) {
-                    _leak_accum -= 1.0f;
-                    _floating_rng = _floating_rng * 1664525u + 1013904223u;
-
-                    // Sprinkled clicks depending on the reset
-                    switch (_uninit_state) {
-                        case UninitializedState::StaticClicks: {
-                            float click_vel = 0.06f + ((_floating_rng & 0xFF) / 255.0f) * 0.16f;
-                            _mod_click.Strike(click_vel);
-                            _leak_rate = 0.006f + (((_floating_rng >> 8) & 0xFF) / 255.0f) * 0.030f;
-                            break;
-                        }
-                        case UninitializedState::MemoryGhost: {
-                            float click_vel = 0.04f + ((_floating_rng & 0x7F) / 127.0f) * 0.06f;
-                            _mod_click.Strike(click_vel);
-                            _leak_rate = 0.003f + (((_floating_rng >> 8) & 0xFF) / 255.0f) * 0.006f;
-                            break;
-                        }
-                        default: {
-                            float click_vel = 0.03f + ((_floating_rng & 0x3F) / 63.0f) * 0.04f;
-                            _mod_click.Strike(click_vel);
-                            _leak_rate = 0.001f + (((_floating_rng >> 8) & 0xFF) / 255.0f) * 0.002f;
-                            break;
-                        }
-                    }
-
-                    // Sprinkled uninitialized RAM micro-glitches & comb pings
-                    if ((_floating_rng & 0x07) == 0) {
-                        _mod_filter.Ping((0.04f + ((_floating_rng & 0x3F) / 63.0f) * 0.06f) * _warmup_progress);
-                    }
-                    if ((_floating_rng & 0x0F) == 1) {
-                        _mod_delay.TriggerBufferSkip((0.35f + ((_floating_rng & 0x1F) / 31.0f) * 0.35f) * _warmup_progress);
-                    }
-                }
-
-                // Personality-specific uninitialized circuit states
-                switch (_uninit_state) {
-                    case UninitializedState::StaticClicks:
-                        eff_vca = _smooth_vca;
-                        eff_feedback = daisysp::fclamp(_smooth_feedback * 0.75f + 0.20f * _warmup_progress, 0.0f, 0.70f);
-                        break;
-
-                    case UninitializedState::SputteringRail:
-                        // Sub-harmonic motorboat throb (18–32 Hz)
-                        eff_pitch = 18.0f + 14.0f * _warmup_progress;
-                        eff_vca = std::max(_smooth_vca, 0.12f * _warmup_progress);
-                        eff_vcc = daisysp::fclamp(_smooth_vcc - 0.45f * _warmup_progress, 0.03f, 0.40f);
-                        break;
-
-                    case UninitializedState::CorruptedMemory:
-                        eff_vca = _smooth_vca;
-                        eff_corrupt_vol = std::max(_smooth_corrupt_vol, 0.08f * _warmup_progress);
-                        eff_feedback = daisysp::fclamp(_smooth_feedback * 0.70f + 0.15f * _warmup_progress, 0.0f, 0.65f);
-                        break;
-
-                    case UninitializedState::MemoryGhost:
-                        eff_vca = _smooth_vca;
-                        eff_feedback = daisysp::fclamp(_smooth_feedback + 0.35f * _warmup_progress, 0.0f, 0.86f);
-                        break;
-
-                    case UninitializedState::SingingHarmonic:
-                        eff_pitch = 55.0f * _floating_pitch_ratio;
-                        eff_vca = std::max(_smooth_vca, _floating_ghost_vca * _warmup_progress);
-                        break;
-                }
-            }
-        } else {
-            _warmup_progress = 0.0f;
-            _warmup_delay = 0;
-        }
-
         _mod_drone.SetParam(0, eff_pitch);
         _mod_drone.SetParam(1, eff_vca);
         _mod_drone.SetParam(2, _smooth_sub);
@@ -400,80 +285,12 @@ public:
     float GetDelayTime() const     { return _mod_delay.GetCurrentDelayTime(); }
     float GetPitch() const         { return _smooth_pitch; }
 
-    void EnterFloatingState() {
-        _pending_floating = true;
-    }
-
     void CleanReset() {
         _pending_reset = true;
     }
 
 private:
-    void ExecuteFloatingState() {
-        _floating_active = true;
-        _warmup_delay = 15; // Fast ~20ms debounce settle (kills physical switch contact bounce)
-        _warmup_progress = 0.0f;
-
-        // 1. Immediately wipe delay buffers & feedback so previous runaway audio is silenced instantly
-        _mod_delay.ClearBuffers();
-        _circuit.Reset();
-        _target_delay_freeze = false;
-        _target_delay_reverse = 0.0f;
-        _smooth_delay_reverse = 0.0f;
-
-        // 2. Reseed modules for this reset session
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _mod_delay.Reseed(_floating_rng);
-        _mod_click.Reseed(_floating_rng);
-
-        // 3. Roll one of 5 distinct stochastic uninitialized circuit personalities
-        uint32_t roll = (_floating_rng >> 4) % 5;
-        _uninit_state = static_cast<UninitializedState>(roll);
-        if (_uninit_state == UninitializedState::CorruptedMemory) {
-            _mod_corrupt.TriggerNewPersonality();
-        }
-
-        // Seed random leak rates & phases
-        _leak_accum = 0.0f;
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _leak_rate = 0.006f + ((_floating_rng & 0xFF) / 255.0f) * 0.020f;
-
-        // Incommensurate drift phases
-        _floating_phase1 = static_cast<float>((_floating_rng >> 8) & 0xFF) / 255.0f;
-        _floating_phase2 = static_cast<float>((_floating_rng >> 16) & 0xFF) / 255.0f;
-        _floating_phase3 = static_cast<float>((_floating_rng >> 24) & 0xFF) / 255.0f;
-
-        // Pick musical harmonic ratios (used only if SingingHarmonic is rolled)
-        static constexpr float kHarmonics[] = {
-            0.50f, 0.75f, 1.0f, 1.25f, 1.333f, 1.50f, 2.0f
-        };
-        size_t h_idx = (_floating_rng >> 2) % (sizeof(kHarmonics) / sizeof(kHarmonics[0]));
-        _floating_pitch_ratio = kHarmonics[h_idx];
-
-        // Subtle analog microtonal detune (+/- 15 cents max)
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        float detune_semi = (static_cast<float>(static_cast<int32_t>(_floating_rng)) * 2.3283e-10f) * 0.15f;
-        _floating_detune = FastPow2(detune_semi / 12.0f);
-
-        // Ghost VCA level (gentle, 0.08 - 0.14 max, only for SingingHarmonic)
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _floating_ghost_vca = 0.08f + (static_cast<float>(_floating_rng & 0xFF) / 255.0f) * 0.06f;
-
-        // Grittiness / starve bias
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _floating_starve_bias = 0.18f + (static_cast<float>(_floating_rng & 0xFF) / 255.0f) * 0.22f;
-
-        // Cutoff offset & resonance boost
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _floating_cutoff_base = (static_cast<float>(static_cast<int32_t>(_floating_rng)) * 2.3283e-10f) * 0.35f;
-        _floating_res_boost = 0.05f + (static_cast<float>(_floating_rng & 0x7F) / 127.0f) * 0.15f;
-    }
-
     void ExecuteCleanReset() {
-        _floating_active = false;
-        _warmup_progress = 0.0f;
-        _warmup_delay = 0;
-
         // 1. Immediately wipe all delay audio buffers in SDRAM and reset tap heads
         _mod_delay.ClearBuffers();
 
@@ -481,9 +298,9 @@ private:
         _circuit.Reset();
 
         // 3. Reseed submodules with fresh seed for rhythms, S&H intervals, and slice sequences
-        _floating_rng = _floating_rng * 1664525u + 1013904223u;
-        _mod_delay.Reseed(_floating_rng);
-        _mod_click.Reseed(_floating_rng);
+        _rng = _rng * 1664525u + 1013904223u;
+        _mod_delay.Reseed(_rng);
+        _mod_click.Reseed(_rng);
         _mod_corrupt.Reset();
 
         // 4. Clear transient states
@@ -506,12 +323,12 @@ private:
     }
 
 public:
-    bool IsFloatingActive() const   { return _floating_active; }
-    float GetWarmupProgress() const { return _warmup_progress; }
+    bool IsFloatingActive() const   { return false; }
+    float GetWarmupProgress() const { return 0.0f; }
 
     // Backwards-compatible aliases
-    void TriggerCircuitCrash() { EnterFloatingState(); }
-    void SetCrashLatch(bool on) { if (on) EnterFloatingState(); else CleanReset(); }
+    void TriggerCircuitCrash() { CleanReset(); }
+    void SetCrashLatch(bool /*on*/) { CleanReset(); }
 
     void SetClickDelaySync(float val)   { _mod_click.SetDelaySync(val); }
     void SetClickFilterBlend(float val) { _mod_click.SetFilterBlend(val); }
@@ -596,34 +413,7 @@ private:
     float _target_radio_freq{1200.0f};
     float _target_corrupt_vol{0.0f},      _smooth_corrupt_vol{0.0f};
     float _target_corrupt_pressure{0.0f}, _smooth_corrupt_pressure{0.0f};
-
-    enum class UninitializedState : uint8_t {
-        StaticClicks = 0,    // Leaky gate / Geiger static discharges bouncing through delay
-        SputteringRail = 1,  // Starved power rail / sub-harmonic motorboat throb (18-32 Hz)
-        CorruptedMemory = 2, // Corrupted memory grain scan & subtle digital computery chatter
-        MemoryGhost = 3,     // Uninitialized memory comb ringing & sporadic microscopic pings
-        SingingHarmonic = 4  // Tuned harmonic resonance without pitch glide
-    };
-
-    UninitializedState _uninit_state{UninitializedState::StaticClicks};
-    uint16_t _warmup_delay{0};
-    float    _leak_accum{0.0f};
-    float    _leak_rate{0.005f};
-
-    uint32_t _floating_rng{0xDEADBEEF};
-    bool     _floating_active{false};
-    float    _warmup_progress{0.0f};
-    float    _floating_pitch_ratio{1.0f};
-    float    _floating_detune{1.0f};
-    float    _floating_ghost_vca{0.0f};
-    float    _floating_starve_bias{0.0f};
-    float    _floating_cutoff_base{0.0f};
-    float    _floating_res_boost{0.0f};
-    float    _floating_phase1{0.0f};
-    float    _floating_phase2{0.0f};
-    float    _floating_phase3{0.0f};
-
-    volatile bool _pending_floating{false};
+    uint32_t _rng{0xDEADBEEF};
     volatile bool _pending_reset{false};
 
     uint32_t _boot_total_samples{0};
