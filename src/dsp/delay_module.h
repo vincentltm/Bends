@@ -135,73 +135,150 @@ public:
         _target_hold_repeats = 2;
     }
 
-    void SeedUninitializedRam(uint32_t seed, uint32_t sample_count = 96000) {
+    void SeedUninitializedRam(uint32_t seed, uint32_t sample_count = kMaxDelaySamples) {
         uint32_t len = std::min<uint32_t>(sample_count, kMaxDelaySamples);
         uint32_t rng = seed ? seed : 0x5EED1234u;
 
-        // Modal ghost resonance wavelengths based on open D Dorian harmonics
-        // 164 (293 Hz D4), 109 (440 Hz A4), 73 (659 Hz E5), 138 (349 Hz F4)
-        static constexpr uint16_t kWavelengths[4] = { 164, 109, 73, 138 };
-        uint16_t wave_len = kWavelengths[(rng >> 4) & 3];
+        // D Dorian harmonic oscillators using fast recursive complex phasors
+        // D1 = 36.71 Hz, D2 = 73.42 Hz, A2 = 110.00 Hz, F3 = 174.61 Hz, E4 = 329.63 Hz
+        static constexpr float kTwoPi = 6.2831853f;
+        const float w1 = kTwoPi * 36.71f / _sample_rate;
+        const float w2 = kTwoPi * 73.42f / _sample_rate;
+        const float wa = kTwoPi * 110.00f / _sample_rate;
+        const float wf = kTwoPi * 174.61f / _sample_rate;
+        const float we = kTwoPi * 329.63f / _sample_rate;
 
-        // Address bus stride patterns typical of uninitialized SRAM/DRAM (16, 24, 32, 48)
-        static constexpr uint8_t kStrides[4] = { 16, 24, 32, 48 };
-        uint8_t stride = kStrides[(rng >> 6) & 3];
+        const float cos_w1 = cosf(w1), sin_w1 = sinf(w1);
+        const float cos_w2 = cosf(w2), sin_w2 = sinf(w2);
+        const float cos_wa = cosf(wa), sin_wa = sinf(wa);
+        const float cos_wf = cosf(wf), sin_wf = sinf(wf);
+        const float cos_we = cosf(we), sin_we = sinf(we);
 
-        float lp_l = 0.0f;
-        float lp_r = 0.0f;
-        float harm_phase_l = 0.0f;
-        float harm_phase_r = 1.5707963f;
-        float harm_inc = 6.2831853f / static_cast<float>(wave_len);
+        float re1 = 1.0f, im1 = 0.0f;
+        float re2 = 1.0f, im2 = 0.0f;
+        float rea = 0.0f, ima = 1.0f;
+        float ref = 0.707f, imf = 0.707f;
+        float ree = 0.0f, ime = 1.0f;
+
+        float lp_noise_l = 0.0f;
+        float lp_noise_r = 0.0f;
+
+        // 4 evolving sectors across the 10.9-second SDRAM buffer (131,072 samples each)
+        const uint32_t sector_len = len / 4;
 
         for (uint32_t i = 0; i < len; ++i) {
+            // Complex phasor rotation: 4 FLOPs per oscillator
+            float n_re1 = re1 * cos_w1 - im1 * sin_w1;
+            float n_im1 = im1 * cos_w1 + re1 * sin_w1;
+            re1 = n_re1; im1 = n_im1;
+
+            float n_re2 = re2 * cos_w2 - im2 * sin_w2;
+            float n_im2 = im2 * cos_w2 + re2 * sin_w2;
+            re2 = n_re2; im2 = n_im2;
+
+            float n_rea = rea * cos_wa - ima * sin_wa;
+            float n_ima = ima * cos_wa + rea * sin_wa;
+            rea = n_rea; ima = n_ima;
+
+            float n_ref = ref * cos_wf - imf * sin_wf;
+            float n_imf = imf * cos_wf + ref * sin_wf;
+            ref = n_ref; imf = n_imf;
+
+            float n_ree = ree * cos_we - ime * sin_we;
+            float n_ime = ime * cos_we + ree * sin_we;
+            ree = n_ree; ime = n_ime;
+
+            // Re-normalize periodically to prevent floating-point drift over 500k samples
+            if ((i & 0x01FF) == 0) {
+                float inv_m1 = 1.0f / sqrtf(re1 * re1 + im1 * im1);
+                re1 *= inv_m1; im1 *= inv_m1;
+                float inv_m2 = 1.0f / sqrtf(re2 * re2 + im2 * im2);
+                re2 *= inv_m2; im2 *= inv_m2;
+                float inv_ma = 1.0f / sqrtf(rea * rea + ima * ima);
+                rea *= inv_ma; ima *= inv_ma;
+                float inv_mf = 1.0f / sqrtf(ref * ref + imf * imf);
+                ref *= inv_mf; imf *= inv_mf;
+                float inv_me = 1.0f / sqrtf(ree * ree + ime * ime);
+                ree *= inv_me; ime *= inv_me;
+            }
+
             rng = rng * 1664525u + 1013904223u;
-            float raw_noise_l = static_cast<float>(static_cast<int32_t>(rng)) * 2.3283e-10f;
-            rng = rng * 1664525u + 1013904223u;
-            float raw_noise_r = static_cast<float>(static_cast<int32_t>(rng)) * 2.3283e-10f;
 
-            // Warm low-pass filtered thermal/pink noise floor
-            lp_l += 0.07f * (raw_noise_l - lp_l);
-            lp_r += 0.07f * (raw_noise_r - lp_r);
+            // Subtle warm analog tape hiss floor (gentle 0.02 max, NOT white noise blast)
+            float raw_noise_l = static_cast<float>(static_cast<int16_t>(rng & 0xFFFF)) * (0.020f / 32768.0f);
+            float raw_noise_r = static_cast<float>(static_cast<int16_t>((rng >> 16) & 0xFFFF)) * (0.020f / 32768.0f);
+            lp_noise_l += 0.06f * (raw_noise_l - lp_noise_l);
+            lp_noise_r += 0.06f * (raw_noise_r - lp_noise_r);
 
-            // Memory bus stripe pattern: simulates uninitialized RAM bit-word addressing
-            uint32_t bus_l = (i / stride) & 7;
-            uint32_t bus_r = ((i + 11) / stride) & 7;
-            float bus_step_l = (static_cast<float>(bus_l) - 3.5f) * 0.007f;
-            float bus_step_r = (static_cast<float>(bus_r) - 3.5f) * 0.007f;
+            uint32_t t = i >> 2; // 12 kHz clock for musical bytebeat address arps
+            uint32_t sector = i / sector_len;
+            if (sector > 3) sector = 3;
 
-            // Modal ghost resonance
-            harm_phase_l += harm_inc;
-            if (harm_phase_l >= 6.2831853f) harm_phase_l -= 6.2831853f;
-            harm_phase_r += harm_inc;
-            if (harm_phase_r >= 6.2831853f) harm_phase_r -= 6.2831853f;
-            float harm_l = sinf(harm_phase_l) * 0.028f;
-            float harm_r = sinf(harm_phase_r) * 0.028f;
+            uint32_t b_l = 0, b_r = 0;
+            float chord_l = 0.0f, chord_r = 0.0f;
+
+            switch (sector) {
+                case 0:
+                    // Sector 0 (0.0s - 2.7s): Heavy Sub-Bass Pulse & Motorboat Throb
+                    b_l = ((t * 2) & (t >> 6)) | ((t * 4) & (t >> 8));
+                    b_r = ((t * 2) & (t >> 6)) | ((t * 3) & (t >> 8));
+                    chord_l = im1 * 0.32f + im2 * 0.22f;
+                    chord_r = im1 * 0.32f + ima * 0.22f;
+                    break;
+
+                case 1:
+                    // Sector 1 (2.7s - 5.5s): Melodic Binary Arpeggio & Warm Minor Pad
+                    b_l = ((t * 3) & (t >> 5)) ^ ((t * 5) & (t >> 7));
+                    b_r = ((t * 5) & (t >> 5)) ^ ((t * 3) & (t >> 7));
+                    chord_l = im2 * 0.18f + ima * 0.18f + imf * 0.14f;
+                    chord_r = im2 * 0.18f + ima * 0.18f + ime * 0.14f;
+                    break;
+
+                case 2:
+                    // Sector 2 (5.5s - 8.2s): Singing Harmonic Glass & Ambient 5ths/9ths
+                    b_l = (t >> 4 | t >> 7) & 63;
+                    b_r = (t >> 4 | t >> 8) & 63;
+                    chord_l = ima * 0.22f + imf * 0.20f + ime * 0.16f;
+                    chord_r = im2 * 0.22f + ima * 0.20f + ime * 0.16f;
+                    break;
+
+                default:
+                    // Sector 3 (8.2s - 10.9s): Cosmic Geiger Discharges & Deep Radio Drone
+                    b_l = (t * 7 & t >> 9) ^ (t >> 4);
+                    b_r = (t * 9 & t >> 9) ^ (t >> 4);
+                    chord_l = im1 * 0.28f + im2 * 0.15f;
+                    chord_r = im1 * 0.28f + ima * 0.15f;
+                    break;
+            }
+
+            // 8-bit DAC staircase binary waveform (-0.20 to +0.20)
+            float dac_l = ((static_cast<float>(b_l & 0xFF) / 128.0f) - 1.0f) * 0.20f;
+            float dac_r = ((static_cast<float>(b_r & 0xFF) / 128.0f) - 1.0f) * 0.20f;
 
             // Sparse cosmic ray bit-discharges / static pops
-            float click_l = 0.0f;
-            float click_r = 0.0f;
-            if ((rng & 0x0FFF) == 0x07A1) {
-                click_l = ((rng & 1) ? 0.09f : -0.09f);
+            float pop_l = 0.0f, pop_r = 0.0f;
+            if ((rng & 0x1FFF) == 0x0042) {
+                pop_l = (rng & 1) ? 0.18f : -0.18f;
             }
-            if (((rng >> 12) & 0x0FFF) == 0x03B2) {
-                click_r = ((rng & 2) ? 0.09f : -0.09f);
+            if (((rng >> 16) & 0x1FFF) == 0x0084) {
+                pop_r = (rng & 2) ? 0.18f : -0.18f;
             }
 
-            g_sdram_delay_l[i] = daisysp::fclamp(lp_l * 1.4f + bus_step_l + harm_l + click_l, -0.9f, 0.9f);
-            g_sdram_delay_r[i] = daisysp::fclamp(lp_r * 1.4f + bus_step_r + harm_r + click_r, -0.9f, 0.9f);
+            float sample_l = chord_l + dac_l + lp_noise_l + pop_l;
+            float sample_r = chord_r + dac_r + lp_noise_r + pop_r;
+
+            // Warm soft-clip saturation into SDRAM
+            g_sdram_delay_l[i] = daisysp::SoftClip(sample_l / (1.0f + 0.15f * std::abs(sample_l)));
+            g_sdram_delay_r[i] = daisysp::SoftClip(sample_r / (1.0f + 0.15f * std::abs(sample_r)));
         }
 
-        if (len < kMaxDelaySamples) {
-            memset(&g_sdram_delay_l[len], 0, (kMaxDelaySamples - len) * sizeof(float));
-            memset(&g_sdram_delay_r[len], 0, (kMaxDelaySamples - len) * sizeof(float));
-        }
-
-        _write_ptr = len & kMaxDelayMask;
+        // Anchor freeze to current delay time window so initial loop size reflects Knob S33
+        float cur_window = daisysp::fclamp(_smooth_delay_samples, 2400.0f, static_cast<float>(kMaxDelaySamples - 2000));
+        _write_ptr = 0;
         _freeze = true;
-        _freeze_anchor = _write_ptr;
-        _smooth_freeze_window = static_cast<float>(len);
-        _target_freeze_window = static_cast<float>(len);
+        _freeze_anchor = static_cast<uint32_t>(cur_window);
+        _smooth_freeze_window = cur_window;
+        _target_freeze_window = cur_window;
         _freeze_phase = 0.0f;
         _smooth_freeze_speed = 1.0f;
         _target_freeze_speed = 1.0f;

@@ -152,8 +152,12 @@ public:
                 float drift_sin3 = std::sin(_floating_phase3 * 6.2831853f);
 
                 // Shared chassis bootup hum & ground throb across all reset holds
-                eff_hum_buzz = std::max(_target_hum_buzz, (0.022f + 0.012f * drift_sin1) * _warmup_progress);
-                eff_hum_gnd  = std::max(_target_hum_gnd, (0.016f + 0.008f * drift_sin2) * _warmup_progress);
+                eff_hum_buzz = std::max(_target_hum_buzz, (0.028f + 0.012f * drift_sin1) * _warmup_progress);
+                eff_hum_gnd  = std::max(_target_hum_gnd, (0.020f + 0.008f * drift_sin2) * _warmup_progress);
+
+                // Deep warm analog drone body (36.7 Hz - 55 Hz sub-octave) so reset hold is full, fat, and musical
+                eff_pitch = 36.71f + 18.0f * _warmup_progress + drift_sin1 * 3.0f;
+                eff_vca = std::max(_smooth_vca, (0.16f + 0.04f * drift_sin2) * _warmup_progress);
 
                 // Microtonal pitch drift up to +/- 18 cents (0.015 octaves)
                 float pitch_drift_oct = (drift_sin1 * 0.010f + drift_sin2 * 0.005f) * _warmup_progress;
@@ -363,7 +367,7 @@ public:
         _floating_active = false;
         _warmup_progress = 0.0f;
         _warmup_delay = 0;
-        _mod_delay.SeedUninitializedRam(seed, 96000);
+        _mod_delay.SeedUninitializedRam(seed);
         _target_delay_freeze = true;
     }
 
