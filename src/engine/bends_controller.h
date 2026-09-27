@@ -30,9 +30,9 @@ public:
     void Process(daisy::DaisySeed& /*hw*/, synthux::Touch& touch, TouchBender& bender, uint32_t /*loop_counter*/) {
         if (!_engine) return;
 
+        ProcessSwitchA(touch, bender);
         bender.Process(touch.pads());
 
-        ProcessSwitchA(touch);
         float drone_pitch_val = ProcessKnobs(touch, bender);
         float starve_amount = 1.0f - _engine->GetVcc();
         float drive_val = _engine->GetDrive();
@@ -61,7 +61,7 @@ public:
     }
 
 private:
-    void ProcessSwitchA(synthux::Touch& touch) {
+    void ProcessSwitchA(synthux::Touch& touch, TouchBender& bender) {
         bool a_up   = touch.switches().IsAUp();
         bool a_down = touch.switches().IsADown();
 
@@ -73,12 +73,17 @@ private:
                 // Boot in Freeze: clean freeze on whatever is in buffer
                 _engine->SetDelayFreeze(true);
             }
+            if (a_down) {
+                bender.Latch();
+            }
             return;
         }
 
-        // Switch A Down: Clean reset (kills runaway feedback & clears delay buffers instantly)
+        // Switch A Down: Latch pads & pressure state matrix (touching adds on top)
         if (a_down && !_was_a_down) {
-            _engine->CleanReset();
+            bender.Latch();
+        } else if (!a_down && _was_a_down) {
+            bender.Unlatch();
         }
 
         // Switch A Up: Dedicated clean buffer freeze
@@ -474,7 +479,10 @@ private:
         float breath = 0.05f + 0.04f * (sinf(_led_breath_phase) * 0.5f + 0.5f);
 
         float target_led = 0.0f;
-        if (max_touch > 0.02f || max_prox > 0.08f) {
+        if (bender.IsLatched()) {
+            // Latched pad state indicator: steady warm illumination + audio VU pulse
+            target_led = 0.28f + max_touch * 0.45f + audio_peak * 0.25f;
+        } else if (max_touch > 0.02f || max_prox > 0.08f) {
             // Touch force response + audio VU pulse
             target_led = 0.12f + max_touch * 0.65f + max_prox * 0.20f + audio_peak * 0.30f;
         } else {
