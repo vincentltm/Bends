@@ -64,13 +64,11 @@ private:
     void ProcessSwitchA(synthux::Touch& touch) {
         bool a_up   = touch.switches().IsAUp();
         bool a_down = touch.switches().IsADown();
-        bool b_down = touch.switches().IsBDown();
-        bool any_down = a_down || b_down;
 
         if (_first_switch_read) {
             _first_switch_read = false;
             _was_a_up = a_up;
-            _was_a_down = any_down;
+            _was_a_down = a_down;
             if (a_up) {
                 // Boot in Freeze: clean freeze on whatever is in buffer
                 _engine->SetDelayFreeze(true);
@@ -78,7 +76,7 @@ private:
             return;
         }
 
-        if (any_down) {
+        if (a_down) {
             // While held Down: keep Down-to-Freeze gesture timer primed (~350ms in 1ms ticks)
             _down_to_freeze_counter = 280;
             if (!_was_a_down) {
@@ -107,7 +105,7 @@ private:
         }
 
         _was_a_up = a_up;
-        _was_a_down = any_down;
+        _was_a_down = a_down;
     }
 
     float ProcessKnobs(synthux::Touch& touch, TouchBender& bender) {
