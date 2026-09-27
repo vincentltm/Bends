@@ -254,8 +254,9 @@ public:
             _smooth_freeze_window = daisysp::fclamp(_smooth_delay_samples, 24.0f, static_cast<float>(kMaxDelaySamples - 2000));
             _target_freeze_window = _smooth_freeze_window;
             _freeze_phase = 0.0f;
-            _smooth_freeze_speed = _prep_clock_speed;
-            _target_freeze_speed = _prep_clock_speed;
+            float tape_dir = 1.0f - 2.0f * _smooth_reverse;
+            _smooth_freeze_speed = 1.0f * tape_dir;
+            _target_freeze_speed = 1.0f * tape_dir;
         } else if (!freeze && _freeze) {
             _unfreeze_xfade = 1.0f;
         }
@@ -448,9 +449,19 @@ public:
             float fb_delta = _feedback - _freeze_fb_anchor;
             _target_freeze_scrub = fb_delta * 360000.0f;
 
-            // Freeze playback speed directly matches the live clock speed (Voltage fader) with +/- 1 octave varispeed
+            // Freeze playback speed centered dynamically around the slider position at freeze time (_freeze_clock_ref)
+            // Zero pitch jump upon freeze; moving the slider above freeze position speeds up / pitches up,
+            // moving below freeze position slows down / pitches down.
             float tape_dir = 1.0f - 2.0f * _smooth_reverse;
-            float freeze_clock_oct = (_master_clock - 0.5f) * 2.0f;
+            float delta = _master_clock - _freeze_clock_ref;
+            float freeze_clock_oct = 0.0f;
+            if (delta >= 0.0f) {
+                float range_up = std::max(0.01f, 1.0f - _freeze_clock_ref);
+                freeze_clock_oct = (delta / range_up) * 1.5f; // Up to +1.5 octaves
+            } else {
+                float range_down = std::max(0.01f, _freeze_clock_ref);
+                freeze_clock_oct = (delta / range_down) * 2.0f; // Down to -2.0 octaves
+            }
             float freeze_brake = 1.0f - daisysp::fclamp(_smooth_clock_bend * 0.60f, 0.0f, 0.85f);
             _target_freeze_speed = daisysp::fclamp(FastPow2(freeze_clock_oct) * freeze_brake * tape_dir, -4.0f, 4.0f);
         }
