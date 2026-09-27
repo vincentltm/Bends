@@ -4,6 +4,7 @@ CPP_STANDARD = -std=gnu++17
 
 CPP_SOURCES = \
     src/main.cpp \
+    src/dsp/sdram_buffer.cpp \
     src/touch/knobs.cpp \
     src/touch/pads.cpp \
     src/touch/switches.cpp

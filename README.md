@@ -17,15 +17,15 @@ Drawing on Reed Ghazala's concept of body contacts, the hardware uses touch pads
 ## Controls
 
 ### Faders
-- **S36 (Left Fader)**: Starve (Vcc). Pulling down starves the power rail into brownout, adding distortion, motorboating sputters, and unstable pitch.
-- **S37 (Right Fader)**: Clock / Pitch. Master pitch and clock over 5 octaves (D0 up to D5). Controls drone pitch, click rates, and glitch timing.
+- **S36 (Left Fader)**: Starve & Delay Speed (Vcc). Controls power rail voltage and delay clock speed over 3 octaves. When delay time is short, moving this fader plays tuned notes and chords in D Dorian against the drone. Pulling down starves the circuit into brownout and saturation.
+- **S37 (Right Fader)**: Drone Pitch & Master Rate. Master pitch over 5 octaves (D0 up to D5), snapped to the D Dorian scale. Also controls P02 click pulse train rate and P09 stutter repeat slice length.
 
 ### Knobs
 - **S30 (Drive)**: Saturation and input gain for the drone oscillator and hum generators.
 - **S31 (Cutoff)**: 2-pole state-variable filter cutoff (55 Hz to 15 kHz).
 - **S32 (Resonance)**: Filter resonance and self-oscillation feedback.
 - **S33 (Delay Time)**: Delay time from short comb filtering (0.8 ms) up to 2.25 seconds. Turning past halfway drops the clock speed towards 17 kHz for a crunchy, lo-fi digital sound.
-- **S34 (Delay Feedback)**: Delay repeats, with soft clipping for singing resonant tails.
+- **S34 (Delay Feedback / Freeze Scrub)**: Delay repeats with singing resonance. In Freeze mode (Switch A Up), scrubs and offsets the freeze start position across up to 7.5 seconds of recorded buffer for granular sweeping.
 - **S35 (Delay Mix)**: Wet / dry balance.
 
 ---
@@ -37,13 +37,13 @@ Touching pads triggers sounds or modulates parameters. Bridging two pads with a 
 - **P00 (Drone Oscillator)**: Pressure opens volume and adds a sub-octave. Air proximity gently opens the filter.
 - **P01 (Filter Ping)**: Tapping strikes the resonant filter like a drum; holding adds resonance modulation.
 - **P02 (Heartbeat / Click)**: Tapping triggers an acoustic transient kick; holding plays a slow pulse train.
-- **P03 (Hum Antenna)**: 50 Hz mains buzz and static crackle.
+- **P03 (Hum Antenna)**: 50 Hz mains buzz and static crackle. Hovering picks up electromagnetic air buzz; bridging to Ground (P08) shunts and silences the buzz.
 - **P04 (Starve Sag)**: Draws extra current from the power rail to deepen brownout.
 - **P05 (Resonant Feedback)**: Bleeds delay repeats back into the filter.
 - **P06 (Delay Clock)**: Bends delay clock time. Bridging P06 to Ground (P08) freezes the delay buffer.
 - **P07 (Radio Whine)**: Heterodyne RF whistle that beats against the master clock.
-- **P08 (Ground)**: Reference ground plane. Bridging pins to ground shunts signals, drops pitch, or freezes audio.
-- **P09 (Stutter)**: Repeats audio slices in rhythmic subdivisions based on pressure. Under starve, triggers digital dropouts.
+- **P08 (Ground / Diffusion)**: Reference ground plane and delay diffusion. Pressing smears delay repeats into a lush reverb wash; air proximity adds a gentle misty halo. Bridging pins to ground shunts signals, drops pitch, or freezes audio.
+- **P09 (Stutter & Glitch)**: Touching or hovering engages a clean granular beat-repeat slice locked to the delay tempo. Pressing harder directly controls glitch probability, producing digital dropouts, tape slips, and address bit-corruption.
 - **P10 (Pitch Ribbon)**: Continuous upward pitch bend.
 - **P11 (Utility Bridge)**: Sends delay feedback directly into the power rail.
 

@@ -111,6 +111,10 @@ public:
         _num_feedback = 0;
         _num_exec_modules = 0;
 
+        for (uint8_t c = 0; c < _num_connections; ++c) {
+            _connections[c].is_feedback = false;
+        }
+
         // Collect registered active modules
         uint8_t active[kMaxModules];
         uint8_t num_active = 0;
@@ -265,9 +269,9 @@ public:
                 if (!mod) continue;
 
                 // Inject circuit input into root modules (modules with no incoming connections)
-                if (_is_root[u] && mod_in_l[u] == 0.0f && mod_in_r[u] == 0.0f) {
-                    mod_in_l[u] = sample_in_l;
-                    mod_in_r[u] = sample_in_r;
+                if (_is_root[u]) {
+                    mod_in_l[u] += sample_in_l;
+                    mod_in_r[u] += sample_in_r;
                 }
 
                 // Process module
@@ -305,14 +309,16 @@ public:
             for (uint8_t f = 0; f < _num_feedback; ++f) {
                 uint8_t c = _fb_wire_indices[f];
                 uint8_t u = _connections[c].src_module;
+                float val = 0.0f;
                 if (_connections[c].src_port >= kPortAux0 && _modules[u]) {
-                    float aux = _modules[u]->GetAuxOutput(_connections[c].src_port - kPortAux0);
-                    _fb_buffers[f][0] = aux;
-                    _fb_buffers[f][1] = aux;
+                    val = _modules[u]->GetAuxOutput(_connections[c].src_port - kPortAux0);
+                } else if (_connections[c].src_port == kPortMainR) {
+                    val = mod_out_r[u];
                 } else {
-                    _fb_buffers[f][0] = mod_out_l[u];
-                    _fb_buffers[f][1] = mod_out_r[u];
+                    val = mod_out_l[u];
                 }
+                _fb_buffers[f][0] = val;
+                _fb_buffers[f][1] = val;
             }
 
             // Write circuit output from last module in execution order

@@ -16,8 +16,10 @@ void Knobs::Init(DaisySeed& hw) {
     }
     hw.adc.Init(cfg, 8);
 
+    // Polled in main loop at ~250 Hz (I2C + 1ms delay)
+    constexpr float kKnobPollRate = 250.0f;
     for (int i = 0; i < 8; i++) {
-        _knobs[i].Init(hw.adc.GetPtr(i), hw.AudioCallbackRate());
+        _knobs[i].Init(hw.adc.GetPtr(i), kKnobPollRate);
         _values[i] = _knobs[i].Process();
     }
 }

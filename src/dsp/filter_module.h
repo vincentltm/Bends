@@ -11,6 +11,11 @@ namespace bends {
 // Resonant state-variable filter (LP/BP) with ping input.
 class FilterModule : public Module {
 public:
+    enum class AuxPort : uint8_t {
+        CutoffMod    = 0,
+        ResonanceMod = 1
+    };
+
     FilterModule() = default;
 
     void Init(float sample_rate, uint16_t /*block_size*/) override {
@@ -48,7 +53,7 @@ public:
     }
 
     void Process(float in_l, float in_r, float& out_l, float& out_r) override {
-        // Vactrol decay envelope (~140ms tail) for dynamic, woody, acoustic ping response
+        // Vactrol decay envelope (~140ms tail) for ping response
         _ping_env *= 0.99935f;
 
         float oct_mod = daisysp::fclamp(_aux_in[0], -4.0f, 3.5f);
@@ -60,8 +65,7 @@ public:
         target_cutoff = daisysp::fclamp(target_cutoff, 25.0f, 13500.0f);
         _current_cutoff += 0.05f * (target_cutoff - _current_cutoff);
 
-        // Dynamic resonance ceiling: prevents dangerous ultrasonic shrieks and runaway instability
-        // at high cutoffs while allowing warm, full singing self-oscillation in low/mid register.
+        // Dynamic resonance ceiling: prevents instability at high cutoffs while allowing self-oscillation in low/mid register.
         float max_res = 0.92f;
         if (_current_cutoff > 1200.0f) {
             float norm = daisysp::fclamp((_current_cutoff - 1200.0f) / 10000.0f, 0.0f, 1.0f);
@@ -69,7 +73,7 @@ public:
         }
         float eff_res = daisysp::fclamp(_res + _aux_in[1], 0.0f, max_res);
 
-        // Subsampled coefficient update (every 4 samples = 12 kHz, eliminates 75% of expensive sinf/powf calls)
+        // Subsampled coefficient update (every 4 samples = 12 kHz)
         _decimate_counter++;
         if (_decimate_counter >= 4) {
             _decimate_counter = 0;
@@ -107,7 +111,7 @@ public:
             in_sum = 0.0f;
         }
 
-        // Even-harmonic warmth: 2nd-order analog tube/diode saturation
+        // 2nd-order saturation with even harmonics
         float driven_in = in_sum * _drive_boost;
         float asym = driven_in + (_drive * 0.15f) * (driven_in * std::abs(driven_in));
         float sat_in = (asym / (1.0f + 0.35f * std::abs(asym))) * _drive_vol_comp;
@@ -118,7 +122,7 @@ public:
         float band = _svf.Band();
         _band_out = band;
 
-        // Fast rational soft limiting on the resonant tank (avoids slow sqrtf!)
+        // Rational soft limiting on the resonant tank
         float band_sat = (band / (1.0f + 0.32f * band * band)) * _hf_taper;
         float low_sat  = low / (1.0f + 0.12f * low * low);
 
@@ -128,7 +132,7 @@ public:
         // Vocal formant blend in lowpass mode
         float main_out = (_mode == 1) ? (band_sat * 1.15f) : (low_shaped + band_sat * _res_bite);
 
-        // Automatic resonance gain compensation (keeps perceived loudness remarkably even)
+        // Resonance gain compensation to balance perceived level
         main_out *= _res_gain_comp;
 
         // Master stage soft clip

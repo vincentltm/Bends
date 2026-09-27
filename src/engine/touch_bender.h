@@ -12,6 +12,22 @@ class TouchBender {
 public:
     static constexpr size_t kNumPads = 12;
 
+    enum PadId : size_t {
+        PadDrone       = 0,  // Drone VCA and primary pitch trigger
+        PadFilterPing  = 1,  // Filter ping and bandpass excitation
+        PadClick       = 2,  // Click trigger and percussion strike
+        PadHumAntenna  = 3,  // Body hum / audio antenna
+        PadStarve      = 4,  // Power rail starvation and sag
+        PadReverse     = 5,  // Dedicated delay reverse
+        PadClockBend   = 6,  // Master delay clock bend
+        PadRadioWhine  = 7,  // High-Z parasitic RF whine and feedback bridge
+        PadDiffusion   = 8,  // Reverb diffusion and chassis ground reference
+        PadChassisGnd  = 8,  // Backward compatibility alias
+        PadStutter     = 9,  // Granular stutter slice and glitch
+        PadDroneRibbon = 10, // Drone pitch bend ribbon
+        PadStarveUtil  = 11  // Starve utility bridge
+    };
+
     void Init() {
         for (size_t i = 0; i < kNumPads; ++i) {
             _pressures[i] = 0.0f;

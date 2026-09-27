@@ -17,12 +17,12 @@ public:
         220.0f, // P00: Drone
         220.0f, // P01: Filter Ping
         220.0f, // P02: Click
-        220.0f, // P03: Hum
+        220.0f, // P03: Hum Antenna
         260.0f, // P04: Starve
         230.0f, // P05: Valley Feedback
         230.0f, // P06: Delay Clock
         220.0f, // P07: Radio Whine
-        250.0f, // P08: Ground
+        250.0f, // P08: Ground / Diffusion
         250.0f, // P09: Stutter
         220.0f, // P10: Pitch Ribbon
         220.0f  // P11: Utility Bridge

@@ -6,7 +6,7 @@
 namespace bends {
 
 /**
- * Ultra-fast 2^x approximation (~6 CPU cycles on ARM Cortex-M7 vs ~120 cycles for std::pow).
+ * 2^x approximation for ARM Cortex-M7.
  * Uses integer power of two exponent extraction and a 3rd-order polynomial on [0, 1].
  */
 inline float FastPow2(float x) {

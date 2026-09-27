@@ -33,7 +33,7 @@ public:
     }};
 
     struct OneEuro {
-        float min_cutoff{1.0f}; // Cutoff at rest (Hz) - rock solid pitch
+        float min_cutoff{1.0f}; // Cutoff at rest (Hz)
         float beta{0.08f};      // Speed sensitivity - fast tracking when moving
         float d_cutoff{1.0f};   // Derivative cutoff (Hz)
         float x{0.5f};
@@ -81,8 +81,8 @@ public:
           _noise_gate(1.0f),
           _power_exp(1.0f),
           _max_proximity(18.0f) {
-        _filter_x.Init(1.2f, 0.12f, 1.0f); // Fast yet rock-solid pitch
-        _filter_z.Init(1.5f, 0.08f, 1.0f); // Smooth dynamic volume
+        _filter_x.Init(1.2f, 0.12f, 1.0f); // Horizontal position filter
+        _filter_z.Init(1.5f, 0.08f, 1.0f); // Proximity height filter
         for (size_t i = 0; i < 12; i++) {
             _pad_delta[i] = 0.0f;
             _smooth_prox[i] = 0.0f;
@@ -106,7 +106,7 @@ public:
         // 1. Per-pad low-pass filter, continuous soft-knee noise gate & smooth temporal slewer
         for (size_t i = 0; i < 12; i++) {
             float raw_d = static_cast<float>(pads.RawDelta(i));
-            // Stage 1: Pre-filter raw delta (eliminates single-sample ADC spikes)
+            // Stage 1: Pre-filter raw delta to attenuate ADC spikes
             _pad_delta[i] += (raw_d - _pad_delta[i]) * 0.40f;
 
             float d = _pad_delta[i];
@@ -123,7 +123,7 @@ public:
             }
 
             // Continuous temporal smoothing: fast attack (~18ms), gentle release (~50ms)
-            // Completely eliminates any binary step, pop, or click
+            // Slewing prevents clicks or stepped transitions
             float slew = (target_p > _smooth_prox[i]) ? 0.25f : 0.08f;
             _smooth_prox[i] += (target_p - _smooth_prox[i]) * slew;
             if (_smooth_prox[i] < 0.001f) _smooth_prox[i] = 0.0f;
@@ -183,7 +183,7 @@ public:
     int StrongestPad() const { return _strongest_pad; }
 
     // Per-pad proximity: 0.0 (hand away) to 1.0 (close/touch)
-    // 100% continuous, slewed analog glide with zero binary step
+    // Continuous slewed response without discrete steps
     float PadProximity(size_t i) const {
         return (i < 12) ? _smooth_prox[i] : 0.0f;
     }

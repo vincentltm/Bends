@@ -18,15 +18,15 @@ void AudioCallback(AudioHandle::InputBuffer in,
                    AudioHandle::OutputBuffer out,
                    size_t size) {
     engine.ProcessBlock(in[0], in[1], out[0], out[1], size);
+    controller.UpdateLedPwm(hw);
 }
 
 int main(void) {
     hw.Init(true);
-    // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes.
-    // Eliminates microcode stalls on denormals during decaying audio tails.
+    // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes to handle denormals.
     __set_FPSCR(__get_FPSCR() | (1 << 24) | (1 << 25));
 
-    // Optimized 64-sample block size (1.33 ms, reduces interrupt overhead by 25%)
+    // 64-sample block size (1.33 ms)
     hw.SetAudioBlockSize(64);
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 

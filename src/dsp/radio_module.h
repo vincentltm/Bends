@@ -18,7 +18,9 @@ public:
 
     void Reset() override {
         _rf_phase = 0.0f;
+        _sub_phase = 0.0f;
         _rf_freq = 1200.0f;
+        _rf_phase_inc = _rf_freq * 6.2831853f / _sample_rate;
         _whine_amp = 0.0f;
     }
 
@@ -27,8 +29,10 @@ public:
         if (_whine_amp > 0.0005f) {
             _rf_phase += _rf_phase_inc;
             if (_rf_phase >= 6.2831853f) _rf_phase -= 6.2831853f;
+            _sub_phase += _rf_phase_inc * 0.5015f;
+            if (_sub_phase >= 6.2831853f) _sub_phase -= 6.2831853f;
             float main_c = sinf(_rf_phase);
-            float sub_c  = sinf(_rf_phase * 0.5015f);
+            float sub_c  = sinf(_sub_phase);
             float raw_rf = main_c * 0.65f + (main_c * sub_c) * 0.70f;
             out = (raw_rf / (1.0f + 0.4f * std::abs(raw_rf))) * _whine_amp;
         }
@@ -74,6 +78,7 @@ private:
     float _rf_freq{1200.0f};
     float _rf_phase_inc{0.15707963f};
     float _rf_phase{0.0f};
+    float _sub_phase{0.0f};
     float _whine_amp{0.0f};
 };
 

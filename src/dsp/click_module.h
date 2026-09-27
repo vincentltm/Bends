@@ -26,6 +26,7 @@ public:
         _rng = 424242u;
         _pressure = 0.0f;
         _pitch = 0.5f;
+        _rate = 0.5f;
         _starve = 0.0f;
         _drive = 0.2f;
         _poly_mod = 0.0f;
@@ -36,6 +37,13 @@ public:
         _time_leak = 0.0f;
         _delay_time_sec = 0.25f;
         _drone_freq = 110.0f;
+        _hold_delay = 0;
+    }
+
+    void Reseed(uint32_t seed) {
+        _rng = seed ? seed : 424242u;
+        _pulse_phase = static_cast<float>((_rng >> 4) & 0xFF) / 255.0f;
+        _poly_phase = static_cast<float>((_rng >> 12) & 0xFF) / 255.0f;
         _hold_delay = 0;
     }
 
@@ -51,6 +59,7 @@ public:
         _poly_mod = daisysp::fclamp(val, 0.0f, 1.0f);
     }
 
+    void SetRate(float val)         { _rate = daisysp::fclamp(val, 0.0f, 1.0f); }
     void SetDelaySync(float val)    { _delay_sync = daisysp::fclamp(val, 0.0f, 1.0f); }
     void SetFilterBlend(float val)  { _filter_blend = daisysp::fclamp(val, 0.0f, 1.0f); }
     void SetGroundFault(float val)  { _ground_fault = daisysp::fclamp(val, 0.0f, 1.0f); }
@@ -78,15 +87,16 @@ public:
         }
 
         // Repeating pulses when pad is held (only after initial hold debounce delay)
-        if (_pressure > 0.03f) {
+        if (_pressure > 0.018f) {
             if (_hold_delay > 0) {
                 _hold_delay--;
             } else {
-                float norm_p = daisysp::fclamp((_pressure - 0.03f) / 0.97f, 0.0f, 1.0f);
-                float pitch_curve = _pitch * _pitch;
-                float min_rate = 0.06f + pitch_curve * 0.80f;
-                float pressure_accel = norm_p * norm_p * norm_p;
-                float base_rate = min_rate + pressure_accel * (5.0f + _pitch * 26.0f);
+                float norm_p = daisysp::fclamp((_pressure - 0.018f) / 0.982f, 0.0f, 1.0f);
+                float rate_curve = _rate * _rate;
+                float min_rate = 0.15f + rate_curve * 2.2f;
+                // Responsive acceleration on light metal contact
+                float pressure_accel = norm_p * (0.25f + 0.75f * norm_p);
+                float base_rate = min_rate + pressure_accel * (4.0f + _rate * 26.0f);
 
                 // Delay subdivision sync (smooth crossfade with conductance)
                 if (_delay_sync > 0.02f) {
@@ -211,6 +221,7 @@ private:
 
     float _pressure{0.0f};
     float _pitch{0.5f};
+    float _rate{0.5f};
     float _starve{0.0f};
     float _drive{0.2f};
     float _poly_mod{0.0f};

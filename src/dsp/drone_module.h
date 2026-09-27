@@ -52,6 +52,7 @@ public:
         float starve = daisysp::fclamp((0.52f - _vcc) * 1.9230769f, 0.0f, 1.0f);
 
         _gate_amp_smooth += 0.006f * (_gate_amp - _gate_amp_smooth);
+        if (std::abs(_gate_amp_smooth) < 1.0e-7f) _gate_amp_smooth = 0.0f;
 
         float pitch_offset = daisysp::fclamp(_aux_in[0], -2.5f, 1.0f);
         float target_freq = daisysp::fclamp(_base_freq * FastPow2(pitch_offset), 15.0f, 3200.0f);
@@ -138,7 +139,7 @@ public:
 private:
     float ReadStarvedSine(float phase, float starve) const {
         float pos = phase * static_cast<float>(kWavetableSize);
-        size_t idx0 = static_cast<size_t>(pos);
+        size_t idx0 = static_cast<size_t>(pos) & (kWavetableSize - 1);
         size_t idx1 = (idx0 + 1) & (kWavetableSize - 1);
         float frac = pos - static_cast<float>(idx0);
 

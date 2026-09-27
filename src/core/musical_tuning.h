@@ -1,6 +1,7 @@
 #pragma once
 
 #include "daisysp.h"
+#include "fast_math.h"
 #include <cmath>
 #include <algorithm>
 
@@ -11,7 +12,7 @@ public:
     static constexpr float kRootD0 = 18.354f;
     static constexpr float kRootD1 = 36.708f;
 
-    // D Pentatonic / Modal scale in semitones (Root, 2nd, m3rd, 4th, 5th, 6th, m7th, 8ve)
+    // D Dorian scale in semitones (Root, 2nd, m3rd, 4th, 5th, 6th, m7th, 8ve)
     static constexpr float kDScale[] = {
         0.0f, 2.0f, 3.0f, 5.0f, 7.0f, 9.0f, 10.0f, 12.0f
     };
@@ -69,7 +70,7 @@ public:
         }
     };
 
-    // Tunes short delay times (< 35ms) to musical scale notes
+    // Tunes short delay times (< 58ms, down to D0 = 18.35Hz) to musical scale notes
     struct CombTuner {
         float current_sec{0.010f};
         float prev_target{0.010f};
@@ -81,25 +82,32 @@ public:
             velocity = snap = 0.0f;
         }
 
-        float Process(float target_sec, float max_snap = 0.75f) {
-            if (target_sec >= 0.035f) {
+        float Process(float target_sec, float max_snap = 0.85f) {
+            // Smoothly blend between comb tuning (< 45ms) and unquantized echo mode (> 65ms)
+            float comb_blend = daisysp::fclamp((0.065f - target_sec) / 0.020f, 0.0f, 1.0f);
+            if (comb_blend <= 0.001f) {
                 current_sec = target_sec;
                 prev_target = target_sec;
+                velocity = 0.0f;
+                snap = 0.0f;
                 return current_sec;
             }
 
             float speed = std::abs(target_sec - prev_target) / std::max(0.0001f, target_sec);
             prev_target = target_sec;
-            velocity += 0.08f * (speed - velocity);
+            velocity += 0.12f * (speed - velocity);
 
-            float speed_factor = daisysp::fclamp(velocity * 100.0f, 0.0f, 1.0f);
-            snap += 0.04f * (max_snap * (1.0f - speed_factor) - snap);
+            float speed_factor = daisysp::fclamp(velocity * 80.0f, 0.0f, 1.0f);
+            float target_snap = max_snap * comb_blend * (1.0f - speed_factor);
+            snap += 0.08f * (target_snap - snap);
 
             float comb_hz = 1.0f / target_sec;
-            float semi = 12.0f * std::log2(std::max(10.0f, comb_hz) / kRootD1);
-            float tuned_sec = 1.0f / (kRootD1 * std::pow(2.0f, SnapToScale(semi, snap) / 12.0f));
+            float semi = 12.0f * std::log2(std::max(10.0f, comb_hz) / kRootD0);
+            float snapped_semi = SnapToScale(semi, snap);
+            float tuned_sec = 1.0f / (kRootD0 * FastPow2(snapped_semi / 12.0f));
+            float target_val = tuned_sec * comb_blend + target_sec * (1.0f - comb_blend);
 
-            current_sec += 0.035f * (tuned_sec - current_sec);
+            current_sec += (0.65f + 0.35f * (1.0f - comb_blend)) * (target_val - current_sec);
             return current_sec;
         }
     };
