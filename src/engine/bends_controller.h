@@ -102,7 +102,15 @@ private:
 
         float drive_raw = touch.knobs().s30();
         float cutoff_raw = 55.0f * FastPow2(touch.knobs().s31() * 8.0769f); // 55 * 2^(s31 * log2(270))
-        float res_raw = 0.05f + touch.knobs().s32() * 0.95f; // Reaches 1.0 for self-oscillation
+        // S32 Filter Character Macro:
+        // 0.00 - 0.35: Silky Clean Lowpass (resonance 0.02 -> 0.38)
+        // 0.35 - 0.75: Vocal Formant Morph (blends resonant bandpass formant into lowpass body)
+        // 0.75 - 1.00: Warm Filter Core Overdrive (asymmetric tube saturation on resonant tank)
+        float raw_s32 = touch.knobs().s32();
+        daisysp::fonepole(_smooth_s32, raw_s32, 0.25f);
+        float s32 = _smooth_s32;
+        float res_raw = s32;
+
         // S33 Delay Time deadband: prevents ADC noise jitter from wiggling delay time when knob is untouched
         float raw_s33 = touch.knobs().s33();
         if (std::abs(raw_s33 - _last_stable_s33) > 0.0035f) {
@@ -110,12 +118,12 @@ private:
         }
         daisysp::fonepole(_smooth_s33, _last_stable_s33, 0.25f);
         float s33 = _smooth_s33;
-        float fb_raw = touch.knobs().s34() * 1.20f;
+        float fb_raw = touch.knobs().s34() * 1.05f;
         float mix_raw = touch.knobs().s35();
 
         _current_res = res_raw;
         _current_cutoff = cutoff_raw;
-        _current_fb = touch.knobs().s34();
+        _current_fb = fb_raw;
 
         // S30 Drive load on the power rail: cranking drive pulls extra current from Vcc (~6% sag at max)
         float drive_draw = (drive_raw * drive_raw) * 0.06f;
@@ -127,13 +135,8 @@ private:
         // Sweeps sample rate from 48 kHz clean down into crunchy PT2399 aliasing without Doppler wobble.
         _engine->SetDelayClock(vcc);
 
-        // Entanglement factor: scales with touch load and starve depth
         float starve_amount = 1.0f - effective_vcc;
         _current_starve = starve_amount;
-        float entangle = daisysp::fclamp(
-            current_draw * 1.5f * (0.3f + starve_amount * 0.7f),
-            0.0f, 0.20f
-        );
 
         _engine->SetDrive(drive_raw);
         _engine->SetCutoff(cutoff_raw);
@@ -149,14 +152,6 @@ private:
         _engine->SetDelayTime(delay_time_sec);
         _engine->SetFeedback(fb_raw);
         _engine->SetMix(mix_raw);
-
-        // Sideways knob leakage when entangled:
-        // Cutoff leaks into delay damping
-        _engine->SetDelayAux(1, cutoff_raw * entangle * 0.00002f);
-        // Drive leaks into filter resonance drive, feedback leaks into filter self-oscillation tendency
-        _engine->SetFilterAux(1, drive_raw * entangle * 0.4f + fb_raw * entangle * 0.15f);
-        // Delay time leaks into click timing
-        _engine->SetClickTimeLeak(s33 * entangle);
 
         // Right Fader: Dedicated Drone Pitch with D Dorian scale snapping
         daisysp::fonepole(_smooth_clock_fader, touch.knobs().RightFader(), 0.15f);
@@ -203,9 +198,10 @@ private:
         float p01_touch = bender.Pressure(1);
         float p01_prox  = touch.air().PadProximity(1);
 
-        // Touch attack triggers a new corrupted memory personality and anchor
+        // Touch attack triggers a new corrupted memory personality and pings the filter
         if (p01_touch > 0.02f && _prev_p01 <= 0.02f) {
             _engine->TriggerCorruptPersonality();
+            _engine->PingFilter(daisysp::fclamp(p01_touch * 2.0f + 0.35f, 0.35f, 1.0f));
         }
         _prev_p01 = p01_touch;
 
@@ -227,25 +223,31 @@ private:
         _engine->SetCorruptDroneMod(bender.Conductance(0, 1));     // P01 <-> P00 Drone modulation
     }
 
-    void ProcessClick(synthux::Touch& /*touch*/, TouchBender& bender, float clock_val, float gen_drive) {
+    void ProcessClick(synthux::Touch& /*touch*/, TouchBender& bender, float clock_val, float /*gen_drive*/) {
         if (_p02_strike_cooldown > 0) {
             _p02_strike_cooldown--;
         }
         float p02_touch = bender.Pressure(2);
         float p02_dp    = p02_touch - _prev_p02;
-        bool strike_triggered = false;
-        // Sensitive strike threshold (0.04f) catches light metal taps & coin drops
-        if (_p02_strike_cooldown == 0 && p02_dp > 0.04f) {
-            float strike_vel = daisysp::fclamp(p02_dp * 3.2f + 0.08f, 0.08f, 1.0f);
-            if (gen_drive > 0.01f) {
-                _engine->StrikeClick(strike_vel * gen_drive);
-            }
-            _p02_strike_cooldown = 110; // 110ms debounce window
-            strike_triggered = true;
+        bool is_tap     = (_prev_p02 <= 0.015f && p02_touch > 0.015f);
+        bool is_strike  = (p02_dp > 0.035f);
+
+        // Every tap or strike on Pad 2 reliably triggers the percussive click AND pings the resonant filter!
+        if (_p02_strike_cooldown == 0 && (is_tap || is_strike)) {
+            float strike_vel = is_tap ? daisysp::fclamp(p02_touch * 2.2f + 0.40f, 0.40f, 1.0f)
+                                      : daisysp::fclamp(p02_dp * 3.5f + 0.25f, 0.25f, 1.0f);
+
+            // 1. Strike the percussive click module
+            _engine->StrikeClick(strike_vel);
+
+            // 2. Ping the resonant filter directly on every tap!
+            _engine->PingFilter(strike_vel * (0.85f + _current_res * 0.45f));
+
+            _p02_strike_cooldown = 90; // 90ms debounce window for responsive finger drumming
         }
         _prev_p02 = p02_touch;
 
-        _engine->SetClickPressure(p02_touch * gen_drive);
+        _engine->SetClickPressure(p02_touch);
         _engine->SetClickPitch(clock_val);
         _engine->SetClickRate(clock_val);
 
@@ -257,20 +259,15 @@ private:
         float cond_delay_sync = bender.Conductance(2, 6);
         _engine->SetClickDelaySync(cond_delay_sync);
 
-        // P01<->P02: Click excites resonant filter ping and redirects direct output
+        // P01<->P02: Conductance bridging routes filter bandpass to cutoff for extra ping resonance
         float cond_filter_ping = bender.Conductance(1, 2);
-        // Only ping the filter if there is actual physical bridging between P01 and P02
-        float total_ping = cond_filter_ping * (1.0f + _current_res * 0.50f);
-
-        if (total_ping > 0.05f) {
-            _engine->SetClickFilterBlend(total_ping);
-            if (strike_triggered && gen_drive > 0.01f) {
-                _engine->PingFilter(p02_dp * 2.0f * total_ping * gen_drive);
-            }
+        if (cond_filter_ping > 0.04f) {
+            _engine->SetClickFilterBlend(cond_filter_ping);
+            _engine->SetBridgeGain(BridgeId::FilterBpToCutoff, cond_filter_ping * 1.5f);
         } else {
             _engine->SetClickFilterBlend(0.0f);
+            _engine->SetBridgeGain(BridgeId::FilterBpToCutoff, 0.0f);
         }
-        _engine->SetBridgeGain(BridgeId::FilterBpToCutoff, total_ping * 1.8f);
 
         // P02<->P08: Ground fault beat drops
         float cond_ground = bender.Conductance(2, 8);
@@ -523,6 +520,7 @@ private:
     float _current_cutoff{1000.0f};
     float _current_fb{0.35f};
     float _current_starve{0.0f};
+    float _smooth_s32{0.0f};
     float _smooth_s33{0.3f};
     float _last_stable_s33{0.3f};
     float _smooth_clock_fader{0.5f};

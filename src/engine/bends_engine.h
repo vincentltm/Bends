@@ -72,7 +72,7 @@ public:
 
         // Virtual circuit bend bridges (default gain = 0.0f, bridged via touch)
         _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainL, 0.0f}); // 14: Delay to Filter L
-        _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::MainR, 0.0f}); // 15: Delay to Filter R
+        _circuit.Connect({ModuleId::Delay,  Port::Aux1,  ModuleId::Filter, Port::MainR, 0.0f}); // 15: Delay to Filter R
         _circuit.Connect({ModuleId::Filter, Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 16: Filter BP to Cutoff
         _circuit.Connect({ModuleId::Delay,  Port::Aux0,  ModuleId::Filter, Port::Aux0,  0.0f}); // 17: Delay to Cutoff
         _circuit.Connect({ModuleId::Drone,  Port::MainL, ModuleId::Delay,  Port::Aux0,  0.0f}); // 18: Drone to Delay Clock

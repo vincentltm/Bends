@@ -201,10 +201,9 @@ public:
             _hold_delay = 0;
         }
 
-        // Drive scaling and filter blend (redirect energy to filter ping)
-        // When S30 Drive is low, Click/Pulse generator is completely muted for pure external audio processing
-        float direct_gain = 1.0f - _filter_blend * 0.7f;
-        float drive_gain = daisysp::fclamp((_drive - 0.03f) / 0.97f * 2.0f, 0.0f, 2.0f);
+        // Output scaling: Click/pulse is always playable and clear, scaling up into punchy saturation with Drive
+        float direct_gain = 1.0f - _filter_blend * 0.5f;
+        float drive_gain = 0.85f + _drive * 0.75f;
         float scaled = out * drive_gain * direct_gain;
         out_l = scaled;
         out_r = scaled;

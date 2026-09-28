@@ -16,3 +16,8 @@ build/
 *.swp
 *~
 
+# Untracked MVP demo
+mvp_demo/
+../mvp_demo/
+
+

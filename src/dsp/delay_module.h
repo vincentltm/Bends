@@ -862,13 +862,14 @@ public:
         // Mode: 1.0 = Karplus-Strong comb (< 35ms), 0.0 = Echo delay (> 60ms)
         float ks_mode = _prep_ks_mode;
 
-        // Feedback limiter: only for long echo delays to stop runaway buildup; Karplus-Strong sings unattenuated
+        // Dynamic feedback anti-blowout compressor: protects against runaway positive feedback on ALL delay times!
         float fb_mag = 0.5f * (std::abs(sat_l) + std::abs(sat_r));
-        float echo_anti_blowout = 1.0f / (1.0f + std::max(0.0f, fb_mag - 0.85f) * 1.5f);
-        float eff_anti_blowout = 1.0f * ks_mode + echo_anti_blowout * (1.0f - ks_mode);
+        float anti_blowout = 1.0f / (1.0f + std::max(0.0f, fb_mag - 0.60f) * 3.0f);
 
-        float raw_fb = _freeze ? 0.999f : daisysp::fclamp(_feedback + _aux_in[1], 0.0f, 1.20f);
-        float eff_feedback = raw_fb * eff_anti_blowout;
+        // Maximum allowable feedback: short times must stay < 0.97 to prevent runaway positive feedback howl
+        float max_allowable_fb = 1.08f * (1.0f - ks_mode) + 0.965f * ks_mode;
+        float raw_fb = _freeze ? 0.999f : daisysp::fclamp(_feedback + _aux_in[1], 0.0f, max_allowable_fb);
+        float eff_feedback = raw_fb * anti_blowout;
 
         // Feedback source
         float fb_src_l = _freeze ? delayed_l : sat_l;

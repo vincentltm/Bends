@@ -40,9 +40,9 @@ public:
         _decimate_counter = 0;
         _drive_boost = 1.0f + _drive * 3.0f;
         _drive_vol_comp = 1.0f / (1.0f + _drive * 0.65f);
-        _res_gain_comp = 1.0f / (1.0f + _res * 1.5f);
-        _bass_retain = 1.0f + _res * 0.35f;
-        _res_bite = _res * _res * 0.40f;
+        _res_gain_comp = 1.0f / (1.0f + _res * 1.8f);
+        _bass_retain = 1.0f + _res * 0.25f;
+        _res_bite = _res * _res * 0.32f;
         _hf_taper = 1.0f;
     }
 
@@ -65,13 +65,35 @@ public:
         target_cutoff = daisysp::fclamp(target_cutoff, 25.0f, 13500.0f);
         _current_cutoff += 0.05f * (target_cutoff - _current_cutoff);
 
-        // Dynamic resonance ceiling: prevents instability at high cutoffs while allowing self-oscillation in low/mid register.
-        float max_res = 0.92f;
+        // S32 Filter Character Macro:
+        // 0.00 - 0.35: Silky Clean Lowpass (resonance 0.02 -> 0.38)
+        // 0.35 - 0.75: Vocal Formant Morph (blends resonant bandpass formant into lowpass body)
+        // 0.75 - 1.00: Warm Filter Core Overdrive (asymmetric tube saturation on resonant tank)
+        float macro_val = daisysp::fclamp(_res + _aux_in[1], 0.0f, 1.0f);
+
+        float eff_res;
+        float formant_morph = 0.0f;
+        float core_overdrive = 0.0f;
+
+        if (macro_val <= 0.35f) {
+            float t = macro_val / 0.35f;
+            eff_res = 0.02f + t * 0.36f;
+        } else if (macro_val <= 0.75f) {
+            float t = (macro_val - 0.35f) / 0.40f;
+            eff_res = 0.38f + t * 0.24f;
+            formant_morph = t;
+        } else {
+            float t = (macro_val - 0.75f) / 0.25f;
+            eff_res = 0.62f + t * 0.10f;
+            formant_morph = 1.0f;
+            core_overdrive = t;
+        }
+
+        // High frequency stability ceiling: keeps resonance singing without high-frequency shrillness
         if (_current_cutoff > 1200.0f) {
             float norm = daisysp::fclamp((_current_cutoff - 1200.0f) / 10000.0f, 0.0f, 1.0f);
-            max_res = 0.92f - norm * 0.24f; // smoothly tapers down to ~0.68f at 11kHz+
+            eff_res = std::min(eff_res, 0.72f - norm * 0.12f);
         }
-        float eff_res = daisysp::fclamp(_res + _aux_in[1], 0.0f, max_res);
 
         // Subsampled coefficient update (every 4 samples = 12 kHz)
         _decimate_counter++;
@@ -83,7 +105,7 @@ public:
 
                 if (_current_cutoff > 1800.0f) {
                     float hf_excess = (_current_cutoff - 1800.0f) * 0.000166667f;
-                    _hf_taper = 1.0f / (1.0f + hf_excess * 1.6f);
+                    _hf_taper = 1.0f / (1.0f + hf_excess * 2.0f);
                 } else {
                     _hf_taper = 1.0f;
                 }
@@ -91,9 +113,8 @@ public:
             if (std::abs(eff_res - _prev_svf_res) > 0.001f) {
                 _prev_svf_res = eff_res;
                 _svf.SetRes(eff_res);
-                _res_gain_comp = 1.0f / (1.0f + eff_res * 1.5f);
-                _bass_retain = 1.0f + eff_res * 0.35f;
-                _res_bite = eff_res * eff_res * 0.40f;
+                _res_gain_comp = 1.0f / (1.0f + eff_res * 1.6f);
+                _bass_retain = 1.0f + eff_res * 0.25f;
             }
             float target_drv = std::max(0.35f, _drive * 0.95f);
             if (std::abs(target_drv - _prev_svf_drive) > 0.005f) {
@@ -120,18 +141,35 @@ public:
         _band_out = band;
 
         float main_out;
-        if (_drive < 0.05f && eff_res < 0.25f && _ping_env < 0.005f) {
-            // Pristine linear response for clean external audio
+        if (_drive < 0.05f && macro_val < 0.25f && _ping_env < 0.005f) {
+            // Pristine linear response for clean external audio when S32 and Drive are low
             main_out = (_mode == 1) ? band : low;
             main_out *= _res_gain_comp;
         } else {
-            // Rational soft limiting on the resonant tank
-            float band_sat = (band / (1.0f + 0.32f * band * band)) * _hf_taper;
-            float low_sat  = low / (1.0f + 0.12f * low * low);
+            // 1. Resonant Bandpass soft limiting
+            float band_sat = (band / (1.0f + 0.45f * band * band)) * _hf_taper;
+
+            // 2. Warm Core Overdrive on resonant tank when macro > 0.75
+            if (core_overdrive > 0.001f) {
+                float drv_in = band_sat * (1.0f + 1.2f * core_overdrive);
+                // Asymmetric 2nd-order saturation adds rich octave warmth
+                float asym_tank = drv_in + (0.28f * core_overdrive) * (drv_in * std::abs(drv_in));
+                band_sat = asym_tank / (1.0f + 0.45f * std::abs(asym_tank));
+            }
+
+            // 3. Lowpass shaping with bass retention
+            float low_sat  = low / (1.0f + 0.15f * low * low);
             float low_shaped = low_sat * _bass_retain;
-            main_out = (_mode == 1) ? (band_sat * 1.15f) : (low_shaped + band_sat * _res_bite);
-            main_out *= _res_gain_comp;
-            main_out = daisysp::SoftClip(main_out * 0.95f);
+
+            // 4. Formant Morph: smooth blend between pure lowpass and vocal formant peak
+            float formant_peak = band_sat * (0.15f + 0.45f * formant_morph);
+            float low_weight = 1.0f - formant_morph * 0.20f;
+            float combined = (_mode == 1) ? (band_sat * 1.15f) : (low_shaped * low_weight + formant_peak);
+
+            // 5. Equal-loudness gain compensation + overdrive leveling
+            float od_comp = 1.0f / (1.0f + core_overdrive * 0.25f);
+            main_out = combined * _res_gain_comp * od_comp;
+            main_out = daisysp::SoftClip(main_out * 0.90f);
         }
 
         out_l = main_out;
