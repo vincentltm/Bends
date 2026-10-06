@@ -54,6 +54,22 @@ public:
     void ProcessBlock(const float* in_l, const float* in_r,
                       float* out_l, float* out_r,
                       size_t size) {
+        // Pre-scan touched nodes ONCE per 64-sample block (saves hundreds of checks per buffer)
+        uint8_t touched_pads[kPhysicalNodes];
+        float   touched_press[kPhysicalNodes];
+        uint8_t num_touched = 0;
+
+        if (_audition_mode) {
+            for (size_t i = 0; i < kPhysicalNodes; ++i) {
+                float p = _network.Pressure(i);
+                if (p > 0.02f) {
+                    touched_pads[num_touched] = static_cast<uint8_t>(i);
+                    touched_press[num_touched] = p;
+                    num_touched++;
+                }
+            }
+        }
+
         float node_s_in[kSolverNodes]  = {0.0f};
         float node_s_out[kSolverNodes] = {0.0f};
         float node_inj[kSolverNodes]   = {0.0f};
@@ -63,47 +79,29 @@ public:
             float inr = in_r ? in_r[n] : 0.0f;
             float ext_in = (inl + inr) * 0.5f;
 
-            // 1. Gather generator signals for each node
-            if (_audition_mode) {
-                // Test tone audition mode: verify network coupling acoustically
-                _audition.Generate(node_s_in);
-                // Also mix in real external audio into node IN (P10)
-                node_s_in[NodeIn] = ext_in;
-            } else {
-                // Clean passthrough in early skeleton
-                node_s_in[NodeIn]  = ext_in;
-                node_s_in[NodeAmp] = ext_in;
-            }
-
-            // 2. Advance network solver per-sample interpolation
-            _network.Tick(node_s_in, node_s_out, node_inj);
-
-            // 3. Process reader crossovers (LF vs HF separation)
-            _readers.Process(node_inj);
-
-            // 4. Update power rail per-sample ripple
-            float vcc = _rail.Tick(_readers.InjHF(NodeVcc));
-
-            // 5. Update master clock per-sample phase and divider
-            float clk_pulse = _clock.Tick(_readers.InjHF(NodeClk));
-            (void)clk_pulse;
-
-            // 6. Output audition mixing or passthrough
             float sig_l = 0.0f;
             float sig_r = 0.0f;
 
             if (_audition_mode) {
-                // In audition mode, the circuit is silent until pads are touched.
-                // Each touched pad auditions its potential v_i (own signal + injected mix from other pads)
-                for (size_t i = 0; i < kPhysicalNodes; ++i) {
-                    float p = _network.Pressure(i);
-                    if (p > 0.02f) {
+                // If no pads touched, output is clean silence with virtually zero CPU
+                if (num_touched > 0) {
+                    _audition.Generate(node_s_in);
+                    node_s_in[NodeIn] = ext_in;
+
+                    _network.Tick(node_s_in, node_s_out, node_inj);
+
+                    for (uint8_t t = 0; t < num_touched; ++t) {
+                        uint8_t i = touched_pads[t];
                         float v = node_s_out[i];
+                        float p = touched_press[t];
                         sig_l += v * p * 0.40f;
                         sig_r += v * p * 0.40f;
                     }
                 }
             } else {
+                node_s_in[NodeIn]  = ext_in;
+                node_s_in[NodeAmp] = ext_in;
+                _network.Tick(node_s_in, node_s_out, node_inj);
                 sig_l = ext_in * _network.Rho(NodeAmp);
                 sig_r = ext_in * _network.Rho(NodeAmp);
             }
@@ -112,25 +110,15 @@ public:
             sig_l = _dc_blocker_l.Process(sig_l);
             sig_r = _dc_blocker_r.Process(sig_r);
 
-            // Boot fade in ramp
-            if (_boot_fade < 1.0f) {
-                sig_l *= _boot_fade;
-                sig_r *= _boot_fade;
-                _boot_fade += _boot_fade_inc;
-            }
-
-            // Starvation voltage scaling
+            // Power rail starve voltage
+            float vcc = _rail.EffectiveVcc();
             float starve_amp = std::clamp(vcc * 1.2f, 0.0f, 1.0f);
             sig_l *= starve_amp;
             sig_r *= starve_amp;
 
-            // Strict NaN and runaway protection
+            // Strict NaN protection & soft limiting
             if (std::isnan(sig_l) || std::isinf(sig_l)) sig_l = 0.0f;
             if (std::isnan(sig_r) || std::isinf(sig_r)) sig_r = 0.0f;
-            sig_l = std::clamp(sig_l, -1.0f, 1.0f);
-            sig_r = std::clamp(sig_r, -1.0f, 1.0f);
-
-            // Safety soft limiter
             sig_l = daisysp::SoftLimit(sig_l);
             sig_r = daisysp::SoftLimit(sig_r);
 

@@ -24,6 +24,12 @@ struct NetFrame {
     uint8_t active_bridge_count{0};
 };
 
+struct MatrixLink {
+    uint8_t dst;
+    uint8_t src;
+    float   gain;
+};
+
 class Network {
 public:
     Network() {
@@ -163,14 +169,12 @@ public:
 
         // 5. If no bridges or body coupling are active, network is identity
         if (bridge_count == 0 && body_p <= 0.02f) {
+            _frame.active_bridge_count = 0;
+            _num_links = 0;
             for (size_t i = 0; i < kSolverNodes; ++i) {
                 _frame.rho[i]  = 1.0f;
                 _frame.pull[i] = 0.0f;
-                for (size_t j = 0; j < kSolverNodes; ++j) {
-                    _target_T[i][j] = (i == j) ? 1.0f : 0.0f;
-                }
             }
-            PrepareBlockRamp(64);
             return;
         }
 
@@ -180,59 +184,31 @@ public:
         // 7. Assemble AC network and solve: (Y_ac + L) * T = Y_ac
         SolveAC();
 
-        // 8. Prepare linear interpolation ramp for the 64-sample block
-        PrepareBlockRamp(64);
+        // 8. Extract active sparse links for the audio loop
+        _num_links = 0;
+        for (size_t i = 0; i < kSolverNodes; ++i) {
+            _frame.rho[i] = _target_T[i][i];
+            for (size_t j = 0; j < kSolverNodes; ++j) {
+                if (i != j && _target_T[i][j] > 0.015f && _num_links < kMaxLinks) {
+                    float w = NodeTable::Specs[j].writer_gain;
+                    _links[_num_links++] = { static_cast<uint8_t>(i), static_cast<uint8_t>(j), _target_T[i][j] * w };
+                }
+            }
+        }
     }
 
-    // Per-sample tick: advances interpolation and solves AC injection
-    // s_in: raw output signals from blocks
-    // s_out: resulting node potentials (rho * s_in + inj)
-    // inj_out: injected signal from all other nodes
-    // Per-sample tick: advances interpolation and solves AC injection
-    // s_in: raw output signals from blocks
-    // s_out: resulting node potentials (rho * s_in + inj)
-    // inj_out: injected signal from all other nodes
+    // Per-sample tick: advances sparse nodal mixing (ultra-low CPU)
     inline void Tick(const float s_in[kSolverNodes],
                      float s_out[kSolverNodes],
                      float inj_out[kSolverNodes]) {
-        // Fast path: untouched network settled at identity costs near-zero CPU
-        if (_frame.active_bridge_count == 0 && _is_idle) {
-            for (size_t i = 0; i < kSolverNodes; ++i) {
-                inj_out[i] = 0.0f;
-                s_out[i]   = s_in[i];
-            }
-            return;
-        }
-
-        // Active path: smooth matrix entries toward target
-        float max_diff = 0.0f;
         for (size_t i = 0; i < kSolverNodes; ++i) {
-            float inj = 0.0f;
-            for (size_t j = 0; j < kSolverNodes; ++j) {
-                float target = _target_T[i][j];
-                float current = _current_T[i][j];
-                current += 0.015f * (target - current);
-                current = std::clamp(current, 0.0f, 1.0f);
-                _current_T[i][j] = current;
-
-                float diff = std::abs(target - current);
-                if (diff > max_diff) max_diff = diff;
-
-                if (i != j && current > 0.002f) {
-                    float w = NodeTable::Specs[j].writer_gain;
-                    inj += current * w * s_in[j];
-                }
-            }
-            inj = std::clamp(inj, -1.5f, 1.5f);
-            inj_out[i] = inj;
-            s_out[i]   = std::clamp(_current_T[i][i] * s_in[i] + inj, -1.5f, 1.5f);
+            inj_out[i] = 0.0f;
         }
-
-        // Settle into idle fast-path once bridges are released and matrix reaches identity
-        if (_frame.active_bridge_count == 0 && max_diff < 0.002f) {
-            _is_idle = true;
-        } else {
-            _is_idle = false;
+        for (uint8_t l = 0; l < _num_links; ++l) {
+            inj_out[_links[l].dst] += _links[l].gain * s_in[_links[l].src];
+        }
+        for (size_t i = 0; i < kSolverNodes; ++i) {
+            s_out[i] = _frame.rho[i] * s_in[i] + inj_out[i];
         }
     }
 
@@ -432,6 +408,10 @@ private:
     float _smooth_pull[kSolverNodes]{0.0f};
     float _smooth_rho[kSolverNodes]{1.0f};
     bool  _is_idle{true};
+
+    static constexpr size_t kMaxLinks = 24;
+    MatrixLink _links[kMaxLinks];
+    uint8_t    _num_links{0};
 
     NetFrame _frame{};
 };
