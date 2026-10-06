@@ -1,8 +1,7 @@
 #include "daisy_seed.h"
 #include "touch/touch.h"
-#include "engine/bends_engine.h"
-#include "engine/touch_bender.h"
-#include "engine/bends_controller.h"
+#include "engine/bends_engine_v2.h"
+#include "engine/bends_controller_v2.h"
 
 using namespace daisy;
 using namespace synthux;
@@ -10,9 +9,8 @@ using namespace bends;
 
 static DaisySeed hw;
 static Touch touch;
-static TouchBender bender;
-static BendsEngine engine;
-static BendsController controller;
+static BendsEngineV2 engine;
+static BendsControllerV2 controller;
 
 void AudioCallback(AudioHandle::InputBuffer in,
                    AudioHandle::OutputBuffer out,
@@ -31,7 +29,6 @@ int main(void) {
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
     touch.Init(hw);
-    bender.Init();
     engine.Init(hw.AudioSampleRate(), 64);
     controller.Init(&engine);
 
@@ -61,7 +58,7 @@ int main(void) {
 
     while (1) {
         touch.Process();
-        controller.Process(hw, touch, bender, loop_counter);
+        controller.Process(hw, touch, loop_counter);
 
         loop_counter++;
         System::Delay(1);

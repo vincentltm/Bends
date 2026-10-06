@@ -14,7 +14,9 @@ C_INCLUDES = \
     -Isrc/core \
     -Isrc/dsp \
     -Isrc/touch \
-    -Isrc/engine
+    -Isrc/engine \
+    -Isrc/circuit \
+    -Isrc/blocks
 
 LIBDAISY_DIR ?= lib/libDaisy
 DAISYSP_DIR ?= lib/DaisySP
