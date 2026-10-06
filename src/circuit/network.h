@@ -188,24 +188,51 @@ public:
     // s_in: raw output signals from blocks
     // s_out: resulting node potentials (rho * s_in + inj)
     // inj_out: injected signal from all other nodes
+    // Per-sample tick: advances interpolation and solves AC injection
+    // s_in: raw output signals from blocks
+    // s_out: resulting node potentials (rho * s_in + inj)
+    // inj_out: injected signal from all other nodes
     inline void Tick(const float s_in[kSolverNodes],
                      float s_out[kSolverNodes],
                      float inj_out[kSolverNodes]) {
+        // Fast path: untouched network settled at identity costs near-zero CPU
+        if (_frame.active_bridge_count == 0 && _is_idle) {
+            for (size_t i = 0; i < kSolverNodes; ++i) {
+                inj_out[i] = 0.0f;
+                s_out[i]   = s_in[i];
+            }
+            return;
+        }
+
+        // Active path: smooth matrix entries toward target
+        float max_diff = 0.0f;
         for (size_t i = 0; i < kSolverNodes; ++i) {
             float inj = 0.0f;
             for (size_t j = 0; j < kSolverNodes; ++j) {
-                // Unconditionally stable 1-pole filter: smoothly tracks target without overshooting
-                _current_T[i][j] += 0.015f * (_target_T[i][j] - _current_T[i][j]);
-                _current_T[i][j] = std::clamp(_current_T[i][j], 0.0f, 1.0f);
+                float target = _target_T[i][j];
+                float current = _current_T[i][j];
+                current += 0.015f * (target - current);
+                current = std::clamp(current, 0.0f, 1.0f);
+                _current_T[i][j] = current;
 
-                if (i != j) {
+                float diff = std::abs(target - current);
+                if (diff > max_diff) max_diff = diff;
+
+                if (i != j && current > 0.002f) {
                     float w = NodeTable::Specs[j].writer_gain;
-                    inj += _current_T[i][j] * w * s_in[j];
+                    inj += current * w * s_in[j];
                 }
             }
             inj = std::clamp(inj, -1.5f, 1.5f);
             inj_out[i] = inj;
             s_out[i]   = std::clamp(_current_T[i][i] * s_in[i] + inj, -1.5f, 1.5f);
+        }
+
+        // Settle into idle fast-path once bridges are released and matrix reaches identity
+        if (_frame.active_bridge_count == 0 && max_diff < 0.002f) {
+            _is_idle = true;
+        } else {
+            _is_idle = false;
         }
     }
 
@@ -404,6 +431,7 @@ private:
 
     float _smooth_pull[kSolverNodes]{0.0f};
     float _smooth_rho[kSolverNodes]{1.0f};
+    bool  _is_idle{true};
 
     NetFrame _frame{};
 };

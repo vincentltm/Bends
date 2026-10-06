@@ -93,17 +93,14 @@ public:
             float sig_r = 0.0f;
 
             if (_audition_mode) {
-                // Background reference: listen quietly to master mix and amp nodes
-                sig_l = node_s_out[NodeMix] * 0.12f + node_s_out[NodeAmp] * 0.12f;
-                sig_r = node_s_out[NodeMix] * 0.12f + node_s_out[NodeFlt] * 0.12f;
-
-                // Dynamically bring forward any pads touched or bridged
+                // In audition mode, the circuit is silent until pads are touched.
+                // Each touched pad auditions its potential v_i (own signal + injected mix from other pads)
                 for (size_t i = 0; i < kPhysicalNodes; ++i) {
                     float p = _network.Pressure(i);
                     if (p > 0.02f) {
                         float v = node_s_out[i];
-                        sig_l += v * p * 0.25f;
-                        sig_r += v * p * 0.25f;
+                        sig_l += v * p * 0.40f;
+                        sig_r += v * p * 0.40f;
                     }
                 }
             } else {
