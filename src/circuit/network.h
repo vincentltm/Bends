@@ -194,14 +194,18 @@ public:
         for (size_t i = 0; i < kSolverNodes; ++i) {
             float inj = 0.0f;
             for (size_t j = 0; j < kSolverNodes; ++j) {
-                _current_T[i][j] += _step_T[i][j];
+                // Unconditionally stable 1-pole filter: smoothly tracks target without overshooting
+                _current_T[i][j] += 0.015f * (_target_T[i][j] - _current_T[i][j]);
+                _current_T[i][j] = std::clamp(_current_T[i][j], 0.0f, 1.0f);
+
                 if (i != j) {
                     float w = NodeTable::Specs[j].writer_gain;
                     inj += _current_T[i][j] * w * s_in[j];
                 }
             }
+            inj = std::clamp(inj, -1.5f, 1.5f);
             inj_out[i] = inj;
-            s_out[i]   = _current_T[i][i] * s_in[i] + inj;
+            s_out[i]   = std::clamp(_current_T[i][i] * s_in[i] + inj, -1.5f, 1.5f);
         }
     }
 
@@ -247,6 +251,7 @@ private:
                 const auto& spec = NodeTable::Specs[i];
                 float rest = (i == NodeVcc) ? rail_voltage : spec.rest_dc;
                 float diff = (V_dc[i] - rest) / 0.5f;
+                if (std::isnan(diff) || std::isinf(diff)) diff = 0.0f;
                 float raw_pull = std::clamp(diff, -1.0f, 1.0f);
                 // Low-pass smooth the DC pull across control frames (time constant ~ 8 ms)
                 _smooth_pull[i] += 0.15f * (raw_pull - _smooth_pull[i]);
@@ -274,9 +279,33 @@ private:
             B[i][i] = y; // B = Y_ac
         }
 
-        if (CholeskySolveMatrix(A, B, _target_T)) {
+        float solved_T[kSolverNodes][kSolverNodes];
+        if (CholeskySolveMatrix(A, B, solved_T)) {
             for (size_t i = 0; i < kSolverNodes; ++i) {
+                float row_sum = 0.0f;
+                for (size_t j = 0; j < kSolverNodes; ++j) {
+                    float v = solved_T[i][j];
+                    if (std::isnan(v) || std::isinf(v)) v = (i == j) ? 1.0f : 0.0f;
+                    v = std::clamp(v, 0.0f, 1.0f);
+                    _target_T[i][j] = v;
+                    row_sum += v;
+                }
+                // Normalize row if needed so sum = 1
+                if (row_sum > 1.05f || row_sum < 0.95f) {
+                    float inv_sum = 1.0f / std::max(0.001f, row_sum);
+                    for (size_t j = 0; j < kSolverNodes; ++j) {
+                        _target_T[i][j] *= inv_sum;
+                    }
+                }
                 _frame.rho[i] = _target_T[i][i];
+            }
+        } else {
+            // Safe fallback to identity matrix
+            for (size_t i = 0; i < kSolverNodes; ++i) {
+                for (size_t j = 0; j < kSolverNodes; ++j) {
+                    _target_T[i][j] = (i == j) ? 1.0f : 0.0f;
+                }
+                _frame.rho[i] = 1.0f;
             }
         }
     }

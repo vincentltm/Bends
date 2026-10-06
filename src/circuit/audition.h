@@ -42,7 +42,7 @@ public:
                 _phase[i] += _phase_inc[i];
                 if (_phase[i] >= 6.2831853f) _phase[i] -= 6.2831853f;
                 // Soft sine tone
-                s_out[i] = std::sin(_phase[i]) * 0.40f;
+                s_out[i] = std::sin(_phase[i]) * 0.22f;
             } else {
                 s_out[i] = 0.0f;
             }

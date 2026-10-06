@@ -94,16 +94,16 @@ public:
 
             if (_audition_mode) {
                 // Background reference: listen quietly to master mix and amp nodes
-                sig_l = node_s_out[NodeMix] * 0.20f + node_s_out[NodeAmp] * 0.20f;
-                sig_r = node_s_out[NodeMix] * 0.20f + node_s_out[NodeFlt] * 0.20f;
+                sig_l = node_s_out[NodeMix] * 0.12f + node_s_out[NodeAmp] * 0.12f;
+                sig_r = node_s_out[NodeMix] * 0.12f + node_s_out[NodeFlt] * 0.12f;
 
                 // Dynamically bring forward any pads touched or bridged
                 for (size_t i = 0; i < kPhysicalNodes; ++i) {
                     float p = _network.Pressure(i);
-                    if (p > 0.015f) {
+                    if (p > 0.02f) {
                         float v = node_s_out[i];
-                        sig_l += v * p * 0.60f;
-                        sig_r += v * p * 0.60f;
+                        sig_l += v * p * 0.25f;
+                        sig_r += v * p * 0.25f;
                     }
                 }
             } else {
@@ -127,7 +127,13 @@ public:
             sig_l *= starve_amp;
             sig_r *= starve_amp;
 
-            // Hard safety clipping / soft limiter
+            // Strict NaN and runaway protection
+            if (std::isnan(sig_l) || std::isinf(sig_l)) sig_l = 0.0f;
+            if (std::isnan(sig_r) || std::isinf(sig_r)) sig_r = 0.0f;
+            sig_l = std::clamp(sig_l, -1.0f, 1.0f);
+            sig_r = std::clamp(sig_r, -1.0f, 1.0f);
+
+            // Safety soft limiter
             sig_l = daisysp::SoftLimit(sig_l);
             sig_r = daisysp::SoftLimit(sig_r);
 
