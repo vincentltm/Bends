@@ -38,12 +38,28 @@ public:
 
         for (size_t i = 0; i < kSolverNodes; ++i) {
             _phase[i] = 0;
+            _base_freq[i] = freqs[i];
             if (freqs[i] > 0.0f) {
                 // 32-bit phase increment: inc = (freq / sample_rate) * 2^32
                 double inc = (static_cast<double>(freqs[i]) / sample_rate) * 4294967296.0;
                 _phase_inc[i] = static_cast<uint32_t>(inc);
             } else {
                 _phase_inc[i] = 0;
+            }
+        }
+    }
+
+    // Modulate node pitches based on DC pulls (+/- 2.5 octaves)
+    // Pulling to VCC sweeps pitch up; pulling to GND dives pitch down
+    void UpdatePulls(const float pulls[kSolverNodes]) {
+        for (size_t i = 0; i < kSolverNodes; ++i) {
+            float base = _base_freq[i];
+            if (base > 0.0f) {
+                float oct = pulls[i] * 2.5f;
+                float mult = std::pow(2.0f, oct);
+                float eff_f = std::clamp(base * mult, 20.0f, 4000.0f);
+                double inc = (static_cast<double>(eff_f) / _sample_rate) * 4294967296.0;
+                _phase_inc[i] = static_cast<uint32_t>(inc);
             }
         }
     }
@@ -65,6 +81,7 @@ public:
 private:
     float _sample_rate{48000.0f};
     float _sine_lut[256]{0.0f};
+    float _base_freq[kSolverNodes]{0.0f};
     uint32_t _phase[kSolverNodes]{0};
     uint32_t _phase_inc[kSolverNodes]{0};
 };

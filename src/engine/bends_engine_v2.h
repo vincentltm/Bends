@@ -54,7 +54,7 @@ public:
     void ProcessBlock(const float* in_l, const float* in_r,
                       float* out_l, float* out_r,
                       size_t size) {
-        // Pre-scan touched nodes ONCE per 64-sample block (saves hundreds of checks per buffer)
+        // Pre-scan touched nodes ONCE per 64-sample block
         uint8_t touched_pads[kPhysicalNodes];
         float   touched_press[kPhysicalNodes];
         uint8_t num_touched = 0;
@@ -70,6 +70,15 @@ public:
             }
         }
 
+        // 1. Modulate node test pitches from DC pulls (makes stiffness & directionality audible!)
+        float pulls[kSolverNodes];
+        for (size_t i = 0; i < kSolverNodes; ++i) {
+            pulls[i] = _network.Pull(static_cast<NodeId>(i));
+        }
+        if (_audition_mode) {
+            _audition.UpdatePulls(pulls);
+        }
+
         float node_s_in[kSolverNodes]  = {0.0f};
         float node_s_out[kSolverNodes] = {0.0f};
         float node_inj[kSolverNodes]   = {0.0f};
@@ -79,11 +88,20 @@ public:
             float inr = in_r ? in_r[n] : 0.0f;
             float ext_in = (inl + inr) * 0.5f;
 
+            // Per-sample rail and clock ticks
+            float vcc = _rail.Tick(0.0f);
+            float clk_pulse = _clock.Tick(0.0f);
+            (void)clk_pulse;
+
             float sig_l = 0.0f;
             float sig_r = 0.0f;
 
-            if (_audition_mode) {
-                // If no pads touched, output is clean silence with virtually zero CPU
+            if (_rail.IsBrownout()) {
+                // Audible motorboating relaxation pulse during power rail short/collapse
+                float mb = (_rail.EffectiveVcc() > 0.1f) ? 0.35f : 0.0f;
+                sig_l = mb;
+                sig_r = mb;
+            } else if (_audition_mode) {
                 if (num_touched > 0) {
                     _audition.Generate(node_s_in);
                     node_s_in[NodeIn] = ext_in;
@@ -94,8 +112,10 @@ public:
                         uint8_t i = touched_pads[t];
                         float v = node_s_out[i];
                         float p = touched_press[t];
-                        sig_l += v * p * 0.40f;
-                        sig_r += v * p * 0.40f;
+                        // Ground shunts also naturally attenuate volume as pull drops to -1.0
+                        float ground_atten = std::clamp(1.0f + 0.6f * pulls[i], 0.05f, 1.2f);
+                        sig_l += v * p * 0.40f * ground_atten;
+                        sig_r += v * p * 0.40f * ground_atten;
                     }
                 }
             } else {
@@ -111,7 +131,6 @@ public:
             sig_r = _dc_blocker_r.Process(sig_r);
 
             // Power rail starve voltage
-            float vcc = _rail.EffectiveVcc();
             float starve_amp = std::clamp(vcc * 1.2f, 0.0f, 1.0f);
             sig_l *= starve_amp;
             sig_r *= starve_amp;

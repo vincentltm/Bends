@@ -56,9 +56,20 @@ int main(void) {
 
     uint32_t loop_counter = 0;
 
+    hw.StartLog(false);
+
     while (1) {
         touch.Process();
         controller.Process(hw, touch, loop_counter);
+
+        if ((loop_counter % 200) == 0 && touch.pads().HasTouch()) {
+            hw.PrintLine("Rail: %3d%% | VCC pull: %+3d%% | FLT pull: %+3d%% | AMP pull: %+3d%% | Active: %d",
+                         static_cast<int>(engine.GetRail().EffectiveVcc() * 100),
+                         static_cast<int>(engine.Net().Pull(NodeVcc) * 100),
+                         static_cast<int>(engine.Net().Pull(NodeFlt) * 100),
+                         static_cast<int>(engine.Net().Pull(NodeAmp) * 100),
+                         engine.Net().Frame().active_bridge_count);
+        }
 
         loop_counter++;
         System::Delay(1);
