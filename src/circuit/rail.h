@@ -35,20 +35,21 @@ public:
         float v_target = _fader_vcc - r_internal * external_load + network_vcc_pull * 0.5f;
         v_target = std::clamp(v_target, 0.02f, 1.0f);
 
-        // Asymmetric reservoir capacitor: fast discharge on heavy draw, slow recovery
-        float alpha = (v_target < _cap_voltage) ? 0.06f : 0.008f;
+        // Responsive reservoir capacitor: fast discharge on heavy draw (0.25), smooth recovery (0.12)
+        // Provides immediate physical response with zero sluggish lag
+        float alpha = (v_target < _cap_voltage) ? 0.25f : 0.12f;
         _cap_voltage += alpha * (v_target - _cap_voltage);
 
         // Brownout hysteresis comparator
-        if (!_is_brownout && _cap_voltage < 0.12f) {
+        if (!_is_brownout && _cap_voltage < 0.15f) {
             _is_brownout = true;
-        } else if (_is_brownout && _cap_voltage > 0.25f) {
+        } else if (_is_brownout && _cap_voltage > 0.28f) {
             _is_brownout = false;
         }
 
-        // Motorboat relaxation frequency scales with starve depth below 0.20
-        if (_cap_voltage < 0.20f) {
-            _motorboat_freq = 2.0f + 12.0f * (0.20f - _cap_voltage);
+        // Motorboat relaxation frequency scales with starve depth below 0.35
+        if (_cap_voltage < 0.35f) {
+            _motorboat_freq = 2.5f + 6.0f * (0.35f - _cap_voltage) / 0.35f;
         }
     }
 

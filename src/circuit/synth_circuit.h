@@ -55,6 +55,7 @@ public:
         _ks_damp = 0.0f;
         _inj_clk = 0.0f;
         _clk_beat = false;
+        _motorboat_phase = 0.0f;
         _lofi.Init();
         for (size_t i = 0; i < kMaxDelay; ++i) {
             _delay_buf[i] = 0.0f;
@@ -127,15 +128,19 @@ public:
 
     // Per-sample audio tick (48 kHz)
     inline float Tick(float ext_in, float vcc_rail) {
+        float v_rail_eff = std::clamp(_v_dc[NodeVcc], 0.02f, 1.0f);
+        float starve = 1.0f - v_rail_eff;
+
         // ====================================================================
         // 1. MASTER CLOCK (Node 0: CLK)
         // ====================================================================
         float clk_dc = _v_dc[NodeClk];
 
         // S36 clock frequency: 1.0 Hz (rhythmic click) up to 2400 Hz (audio-rate clock whistle)
-        // Audio injection into CLK node FM-modulates clock rate (e.g. OSC -> CLK gives wild chorus & FM sidebands)
+        // Voltage starve sags clock frequency slightly
         float clk_fm = _inj_clk * 1.5f;
-        float clk_rate = 1.0f * std::pow(2.0f, std::clamp(clk_dc * 11.23f + clk_fm, 0.0f, 11.5f));
+        float clk_vcc_sag = 0.60f + 0.40f * (v_rail_eff * v_rail_eff);
+        float clk_rate = (1.0f * std::pow(2.0f, std::clamp(clk_dc * 11.23f + clk_fm, 0.0f, 11.5f))) * clk_vcc_sag;
         _clk_phase += clk_rate / _sample_rate;
         _clk_beat = false;
         if (_clk_phase >= 1.0f) {
@@ -146,15 +151,14 @@ public:
         float s_clk = (_clk_phase < 0.28f) ? 0.65f : -0.25f;
 
         // Converter clock speed factor (1.15 down to 0.35)
-        // CLK pad capacitance pressure also drags clock speed
+        // CLK pad capacitance pressure and voltage starve drag converter speed
         float clk_drag = 1.0f / (1.0f + _pressures[NodeClk] * 0.45f);
-        float clk_speed = std::clamp((0.35f + 0.75f * clk_dc) * clk_drag, 0.20f, 1.15f);
+        float clk_speed = std::clamp((0.35f + 0.75f * clk_dc) * clk_drag * clk_vcc_sag, 0.15f, 1.15f);
 
         // ====================================================================
         // 2. PROBE OSCILLATOR (Node 3: OSC) — SIN, SAW, RND
         // ====================================================================
-        float v_rail_eff = std::clamp(_v_dc[NodeVcc], 0.01f, 1.0f);
-        float osc_freq = 0.15f * std::pow(2.0f, _knob_osc_pos * 14.0f);
+        float osc_freq = 0.15f * std::pow(2.0f, _knob_osc_pos * 14.0f) * clk_vcc_sag;
         float dt = 1.0f / _sample_rate;
 
         _osc_phase += osc_freq * dt;
@@ -348,15 +352,47 @@ public:
             amp_in += 0.025f * _pressures[NodeOsc] * s_osc;
         }
 
-        float drive = 0.2f + 2.2f * _knob_drive_pos;
-        float headroom = std::clamp(v_rail_eff, 0.10f, 1.0f);
-        float amp_out = FastTanh((amp_in * drive) / headroom) * headroom;
+        // --- Low-Voltage Motorboating & Starvation Heartbeat ---
+        // When Vcc drops below 0.35, power rail develops low-frequency relaxation motorboat pulse (2.5 Hz - 8 Hz)
+        if (v_rail_eff < 0.35f) {
+            float starve_depth = (0.35f - v_rail_eff) / 0.35f;
+            float mb_rate = 2.5f + 5.5f * (1.0f - starve_depth);
+            _motorboat_phase += mb_rate * 6.2831853f / _sample_rate;
+            if (_motorboat_phase >= 6.2831853f) _motorboat_phase -= 6.2831853f;
+            float mb_pulse = (std::sin(_motorboat_phase) > 0.65f) ? 0.8f : -0.15f;
+            amp_in += 0.040f * starve_depth * mb_pulse;
+        }
+
+        // --- Starved Preamp Saturation & Velcro Fuzz ---
+        // 1. Asymmetric DC bias drift (causes octave fuzz and duty-cycle asymmetry)
+        float bias_drift = 0.18f * (starve * starve);
+        float biased_in = amp_in + bias_drift;
+
+        // 2. Crossover dead-zone gating (transistor Vbe drop: decaying notes spit and velcro-fuzz)
+        float deadzone = 0.07f * (starve * starve);
+        float gated_in = biased_in;
+        if (std::abs(biased_in) < deadzone) {
+            float sgn = (biased_in >= 0.0f) ? 1.0f : -1.0f;
+            float mag = std::abs(biased_in);
+            gated_in = sgn * (mag * mag) / std::max(0.001f, deadzone);
+        }
+
+        // 3. Drive squashes harder as supply voltage collapses
+        float drive = (0.2f + 2.2f * _knob_drive_pos) * (1.0f + 1.6f * starve);
+        float clipped = FastTanh(gated_in * drive);
+        float bias_null = FastTanh(bias_drift * drive);
+
+        // 4. Output level: maintain punch and loudness across entire fader travel
+        float out_gain = 1.0f - 0.25f * starve;
+        float amp_out = (clipped - bias_null) * out_gain;
         _prev_amp_out = amp_out;
 
         // --- Resonant SVF (Node 4: FLT) ---
         // Pressure opens cutoff slightly
         float flt_dc = _v_dc[NodeFlt] + 0.12f * _pressures[NodeFlt];
-        float flt_freq = 40.0f * std::pow(2.0f, flt_dc * 8.1f);
+        // Starvation sags filter cutoff (dropping OTA transconductance)
+        float flt_v_scale = 0.45f + 0.55f * (v_rail_eff * v_rail_eff);
+        float flt_freq = (40.0f * std::pow(2.0f, flt_dc * 8.1f)) * flt_v_scale;
         if (s_inj[NodeFlt] != 0.0f) {
             flt_freq *= std::pow(2.0f, s_inj[NodeFlt] * 1.5f);
         }
@@ -411,17 +447,26 @@ public:
         float dly_processed;
         if (in_karplus) {
             // One-pole acoustic loop damping filter (controlled by S32 FLT knob)
-            float string_damp = 0.15f + 0.82f * _v_dc[NodeFlt];
+            // Voltage starve darkens string damping slightly
+            float string_damp = (0.15f + 0.82f * _v_dc[NodeFlt]) * (0.65f + 0.35f * v_rail_eff);
             _ks_damp += string_damp * (raw_dly - _ks_damp);
-            dly_processed = _ks_damp;
+
+            // Voltage starve adds asymmetric sitar fret-buzz to the string
+            if (v_rail_eff < 0.70f) {
+                float ks_starve = (0.70f - v_rail_eff) / 0.70f;
+                float buzz_bias = 0.15f * (ks_starve * ks_starve);
+                dly_processed = FastTanh((_ks_damp + buzz_bias) * (1.0f + 1.2f * ks_starve)) - FastTanh(buzz_bias);
+            } else {
+                dly_processed = _ks_damp;
+            }
         } else {
             // Process through PT2399 clock downsampling, delta-slew, and op-amp filters
             _lofi.Prepare(target_time, v_rail_eff * clk_speed, _sample_rate);
             float lofi_read = _lofi.Process(raw_dly);
 
-            // Vintage DAC Stage: 12-bit down to 6-bit + R-2R non-linearity
-            float bit_depth = 6.0f + 6.0f * (clk_speed * v_rail_eff);
-            float dac_dnl = 0.15f * (1.0f - clk_speed);
+            // Vintage DAC Stage: 12-bit down to 4-bit on deep starve + R-2R non-linearity
+            float bit_depth = 4.0f + 8.0f * (clk_speed * v_rail_eff);
+            float dac_dnl = 0.10f + 0.35f * (1.0f - v_rail_eff);
             dly_processed = ApplyDac(lofi_read, bit_depth, dac_dnl);
         }
         _prev_dly_read = dly_processed;
@@ -432,7 +477,8 @@ public:
             // Karplus-Strong string sustain (0.82 to 0.99)
             base_fb = 0.82f + 0.17f * _v_dc[NodeFbk];
         } else {
-            base_fb = _v_dc[NodeFbk] * 0.85f;
+            // Starvation increases feedback slightly as rails clamp and compress
+            base_fb = _v_dc[NodeFbk] * (0.85f + 0.15f * starve);
         }
         // FBK pad pressure swell
         base_fb += _pressures[NodeFbk] * 0.30f;
@@ -528,6 +574,7 @@ private:
     float _prev_amp_out{0.0f};
     float _amp_pluck{0.0f};
     float _hum_phase{0.0f};
+    float _motorboat_phase{0.0f};
 
     // Resonant Filter
     float _knob_flt_pos{0.65f};
