@@ -54,15 +54,6 @@ public:
 
     // Call per sample (48 kHz) with AC ripple from NodeVcc
     inline float Tick(float ac_ripple) {
-        if (_is_brownout) {
-            // In deep brownout, motorboating relaxation pulses dominate
-            _motorboat_phase += _motorboat_freq / _sample_rate;
-            if (_motorboat_phase >= 1.0f) _motorboat_phase -= 1.0f;
-            float pulse = (_motorboat_phase < 0.12f) ? 0.25f : 0.02f;
-            _effective_vcc = pulse;
-            return _effective_vcc;
-        }
-
         // Starvation rail ripple (e.g. OSC bridged to VCC makes the whole circuit breathe)
         float ripple_scale = (1.0f - _cap_voltage) * 0.45f;
         _effective_vcc = std::clamp(_cap_voltage + ac_ripple * ripple_scale, 0.02f, 1.0f);

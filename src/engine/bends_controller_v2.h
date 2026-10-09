@@ -40,8 +40,7 @@ public:
         float s36_clk = touch.knobs().s36(); // S36 (Left Fader): CLK Rate
         float s37_vcc = touch.knobs().s37(); // S37 (Right Fader): VCC Rail
 
-        (void)s30_amp; (void)s31_osc; (void)s32_flt;
-        (void)s33_dly; (void)s34_fbk; (void)s35_mix;
+        _engine->SetKnobs(s30_amp, s31_osc, s32_flt, s33_dly, s34_fbk, s35_mix, s36_clk);
 
         // 3. Process Gestures (tap strikes, hold, solo touches)
         _engine->Gest().Process(touch.pads());

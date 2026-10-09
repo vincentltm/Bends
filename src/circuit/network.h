@@ -104,7 +104,8 @@ public:
                 float g = 0.0f;
 
                 if (live_pi > 0.02f && live_pj > 0.02f) {
-                    g = std::sqrt(live_pi * live_pj) * _weights[i][j] * bend_depth;
+                    float series_p = (2.0f * live_pi * live_pj) / (live_pi + live_pj);
+                    g = series_p * _weights[i][j] * bend_depth;
                 }
 
                 if (is_latched) {
@@ -217,6 +218,9 @@ public:
     float Rho(NodeId id) const  { return _frame.rho[id]; }
     float Load(NodeId id) const { return _frame.load[id]; }
     float Pressure(size_t id) const { return (id < kSolverNodes) ? _pressures[id] : 0.0f; }
+    float Conductance(size_t i, size_t j) const {
+        return (i < kSolverNodes && j < kSolverNodes) ? _conductance[i][j] : 0.0f;
+    }
 
 
 private:

@@ -19,6 +19,65 @@ void AudioCallback(AudioHandle::InputBuffer in,
     controller.UpdateLedPwm(hw);
 }
 
+static void SendTelemetry(DaisySeed& hw, Touch& touch, BendsEngineV2& engine, uint32_t frame) {
+    uint32_t slot = frame % 4;
+    if (slot == 0) {
+        hw.PrintLine("P %d %d %d %d %d %d %d %d %d %d %d %d",
+                     static_cast<int>(touch.pads().Pressure(0) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(1) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(2) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(3) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(4) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(5) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(6) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(7) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(8) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(9) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(10) * 100.0f),
+                     static_cast<int>(touch.pads().Pressure(11) * 100.0f));
+    } else if (slot == 1) {
+        hw.PrintLine("R %d %d %d %d %d %d %d %d %d %d",
+                     static_cast<int>(engine.GetRail().EffectiveVcc() * 100.0f),
+                     engine.GetRail().IsBrownout() ? 1 : 0,
+                     static_cast<int>(touch.knobs().s30() * 100.0f),
+                     static_cast<int>(touch.knobs().s31() * 100.0f),
+                     static_cast<int>(touch.knobs().s32() * 100.0f),
+                     static_cast<int>(touch.knobs().s33() * 100.0f),
+                     static_cast<int>(touch.knobs().s34() * 100.0f),
+                     static_cast<int>(touch.knobs().s35() * 100.0f),
+                     static_cast<int>(touch.knobs().s36() * 100.0f),
+                     static_cast<int>(touch.knobs().s37() * 100.0f));
+    } else if (slot == 2) {
+        hw.PrintLine("D %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld",
+                     static_cast<long>(touch.pads().RawDelta(0)),
+                     static_cast<long>(touch.pads().RawDelta(1)),
+                     static_cast<long>(touch.pads().RawDelta(2)),
+                     static_cast<long>(touch.pads().RawDelta(3)),
+                     static_cast<long>(touch.pads().RawDelta(4)),
+                     static_cast<long>(touch.pads().RawDelta(5)),
+                     static_cast<long>(touch.pads().RawDelta(6)),
+                     static_cast<long>(touch.pads().RawDelta(7)),
+                     static_cast<long>(touch.pads().RawDelta(8)),
+                     static_cast<long>(touch.pads().RawDelta(9)),
+                     static_cast<long>(touch.pads().RawDelta(10)),
+                     static_cast<long>(touch.pads().RawDelta(11)));
+    } else {
+        hw.PrintLine("U %d %d %d %d %d %d %d %d %d %d %d %d",
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeClk) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeRst) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeVcc) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeOsc) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeFlt) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeGnd) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeDly) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeFbk) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeAmp) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeMix) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeIn) * 100.0f),
+                     static_cast<int>(engine.Synth().GetNodeVoltage(NodeOut) * 100.0f));
+    }
+}
+
 int main(void) {
     hw.Init(true);
     // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes to handle denormals.
@@ -62,13 +121,8 @@ int main(void) {
         touch.Process();
         controller.Process(hw, touch, loop_counter);
 
-        if ((loop_counter % 200) == 0 && touch.pads().HasTouch()) {
-            hw.PrintLine("Rail: %3d%% | VCC pull: %+3d%% | FLT pull: %+3d%% | AMP pull: %+3d%% | Active: %d",
-                         static_cast<int>(engine.GetRail().EffectiveVcc() * 100),
-                         static_cast<int>(engine.Net().Pull(NodeVcc) * 100),
-                         static_cast<int>(engine.Net().Pull(NodeFlt) * 100),
-                         static_cast<int>(engine.Net().Pull(NodeAmp) * 100),
-                         engine.Net().Frame().active_bridge_count);
+        if ((loop_counter % 8) == 0) {
+            SendTelemetry(hw, touch, engine, (loop_counter / 8) % 4);
         }
 
         loop_counter++;
