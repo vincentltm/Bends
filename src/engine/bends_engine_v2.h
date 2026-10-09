@@ -36,6 +36,14 @@ public:
         _synth.SetKnobs(s30_amp, s31_osc, s32_flt, s33_dly, s34_fbk, s35_mix, s36_clk);
     }
 
+    void SetSwitches(uint8_t osc_mode, bool is_frozen) {
+        _synth.SetSwitches(osc_mode, is_frozen);
+    }
+
+    void SetPressures(const float pressures[12]) {
+        _synth.SetPressures(pressures);
+    }
+
     Network&     Net()      { return _network; }
     NodeReader&  Readers()  { return _readers; }
     Gestures&    Gest()     { return _gestures; }

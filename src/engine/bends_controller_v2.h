@@ -25,6 +25,14 @@ public:
         if (!_engine) return;
 
         // 1. Process Hardware Switches
+        // Switch A (Left): Up = SIN, Down = RND, Center = SAW
+        uint8_t osc_mode = SynthCircuit::OSC_SAW;
+        if (touch.switches().IsAUp()) {
+            osc_mode = SynthCircuit::OSC_SIN;
+        } else if (touch.switches().IsADown()) {
+            osc_mode = SynthCircuit::OSC_RND;
+        }
+
         // Switch B (Right): Up = Freeze, Down = Latch, Center = Live
         _is_frozen  = touch.switches().IsBUp();
         _is_latched = touch.switches().IsBDown();
@@ -41,6 +49,14 @@ public:
         float s37_vcc = touch.knobs().s37(); // S37 (Right Fader): VCC Rail
 
         _engine->SetKnobs(s30_amp, s31_osc, s32_flt, s33_dly, s34_fbk, s35_mix, s36_clk);
+        _engine->SetSwitches(osc_mode, _is_frozen);
+
+        // Read Pad Pressures for micro-events (AMP pluck, FLT ping, buffer skips)
+        float pressures[12];
+        for (size_t i = 0; i < 12; ++i) {
+            pressures[i] = touch.pads().Pressure(i);
+        }
+        _engine->SetPressures(pressures);
 
         // 3. Process Gestures (tap strikes, hold, solo touches)
         _engine->Gest().Process(touch.pads());
@@ -84,7 +100,7 @@ public:
 private:
     void UpdateLed(uint32_t loop_counter) {
         float vcc = _engine->GetRail().EffectiveVcc();
-        bool beat = _engine->Clk().BeatTrigger();
+        bool beat = _engine->Synth().ClkBeat();
 
         // Base brightness reflects power rail health
         float target_b = vcc * 0.25f;
