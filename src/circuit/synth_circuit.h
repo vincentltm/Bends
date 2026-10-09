@@ -84,10 +84,14 @@ public:
         // ====================================================================
         // 1. MASTER CLOCK (Node 0: CLK)
         // ====================================================================
-        float clk_rate = 0.5f + _knob_clk_pos * 27.5f;
+        float clk_dc = _v_dc[NodeClk];
+        float clk_rate = 0.5f + clk_dc * 27.5f;
         _clk_phase += clk_rate / _sample_rate;
         if (_clk_phase >= 1.0f) _clk_phase -= 1.0f;
         float s_clk = (_clk_phase < 0.20f) ? 0.7f : -0.2f;
+
+        // Converter clock speed factor (1.0 down to 0.12)
+        float clk_speed = 0.12f + 0.88f * (clk_dc * clk_dc);
 
         // ====================================================================
         // 2. RC RELAXATION OSCILLATOR (Node 3: OSC)
@@ -131,8 +135,8 @@ public:
         float v_rest[12];
         float g_stiff[12];
 
-        v_rest[NodeClk] = 0.5f;
-        g_stiff[NodeClk] = 4.0f;
+        v_rest[NodeClk] = _knob_clk_pos;
+        g_stiff[NodeClk] = 3.0f;
 
         v_rest[NodeRst] = 1.0f;
         g_stiff[NodeRst] = 0.3f;
@@ -269,8 +273,8 @@ public:
         _flt_band = FastTanh(_flt_band * 1.2f) * 0.85f;
 
         // --- Lo-Fi Delay (Node 6: DLY & Node 7: FBK) ---
-        // Delay time smoothly tracks resolved DC time + pitch mod (chorus/vibrato)
-        float target_time = 0.03f + _v_dc[NodeDly] * 0.35f;
+        // S36 Master Clock stretches delay time (varispeed) and downsamples converter
+        float target_time = (0.03f + _v_dc[NodeDly] * 0.35f) / clk_speed;
         if (s_inj[NodeDly] != 0.0f) {
             target_time += s_inj[NodeDly] * 0.03f;
         }
@@ -282,22 +286,29 @@ public:
 
         // Read raw buffer with smoothed interpolation
         float raw_dly = ReadDelay(_smooth_delay_samples);
+
         // Process through PT2399 clock downsampling, delta-slew, and op-amp filters
-        _lofi.Prepare(target_time, _v_dc[NodeVcc], _sample_rate);
+        // Scaled by both power rail (VCC) and master converter clock (S36 CLK)
+        _lofi.Prepare(target_time, _v_dc[NodeVcc] * clk_speed, _sample_rate);
         float dly_read = _lofi.Process(raw_dly);
-        _prev_dly_read = dly_read;
+
+        // Vintage DAC Stage: 12-bit down to 5-bit + R-2R non-linearity
+        float bit_depth = 5.0f + 7.0f * (clk_speed * _v_dc[NodeVcc]);
+        float dac_dnl = 0.20f * (1.0f - clk_speed);
+        float dly_dac = ApplyDac(dly_read, bit_depth, dac_dnl);
+        _prev_dly_read = dly_dac;
 
         // Feedback: normal knob setting + injected wet signal from P06 ↔ P07 bridge
         float eff_fb = _v_dc[NodeFbk] * 0.82f + s_inj[NodeFbk] * 0.75f;
         eff_fb = std::clamp(eff_fb, 0.0f, 1.20f);
 
         // Delay input: filter output + warm saturated feedback
-        float dly_in = _flt_low + FastTanh(dly_read * eff_fb);
+        float dly_in = _flt_low + FastTanh(dly_dac * eff_fb);
         WriteDelay(dly_in);
 
         // --- Master Output (Node 9: MIX & Node 11: OUT) ---
         float mix_wet = _v_dc[NodeMix];
-        float mix_out = (1.0f - mix_wet) * _flt_low + mix_wet * dly_read;
+        float mix_out = (1.0f - mix_wet) * _flt_low + mix_wet * dly_dac;
 
         return mix_out * 0.70f;
     }
@@ -307,6 +318,14 @@ public:
     }
 
 private:
+    inline float ApplyDac(float in, float bits, float dnl) const {
+        float levels = std::pow(2.0f, bits);
+        float inv = 1.0f / levels;
+        float q = std::round(in * levels) * inv;
+        float sgn = (in >= 0.0f) ? 1.0f : -1.0f;
+        q += sgn * dnl * inv * (1.0f - std::abs(in));
+        return std::clamp(q, -1.0f, 1.0f);
+    }
     inline float FastTanh(float x) const {
         if (x < -3.0f) return -1.0f;
         if (x > 3.0f) return 1.0f;
