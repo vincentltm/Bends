@@ -78,6 +78,16 @@ static void SendTelemetry(DaisySeed& hw, Touch& touch, BendsEngineV2& engine, ui
     }
 }
 
+static void UsbRxCallback(uint8_t* buff, uint32_t* length) {
+    if (buff && length && *length > 0) {
+        for (uint32_t i = 0; i < *length; ++i) {
+            if (buff[i] == 'b' || buff[i] == 'B' || buff[i] == 'd' || buff[i] == 'D') {
+                System::ResetToBootloader(System::BootloaderMode::STM);
+            }
+        }
+    }
+}
+
 int main(void) {
     hw.Init(true);
     // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes to handle denormals.
@@ -116,6 +126,7 @@ int main(void) {
     uint32_t loop_counter = 0;
 
     hw.StartLog(false);
+    hw.usb_handle.SetReceiveCallback(UsbRxCallback, UsbHandle::UsbPeriph::FS_INTERNAL);
 
     while (1) {
         touch.Process();
