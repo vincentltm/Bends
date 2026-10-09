@@ -1,6 +1,7 @@
 #pragma once
 
 #include "circuit/node_table.h"
+#include "lofi_delay_model.h"
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -31,10 +32,11 @@ public:
         _flt_low = 0.0f;
         _flt_band = 0.0f;
 
-        // Lo-Fi Delay line
+        // Lo-Fi Delay line & PT2399 model
         _delay_write = 0;
         _smooth_delay_samples = 48000.0f * 0.20f;
         _prev_dly_read = 0.0f;
+        _lofi.Init();
         for (size_t i = 0; i < kMaxDelay; ++i) {
             _delay_buf[i] = 0.0f;
         }
@@ -237,6 +239,7 @@ public:
             _flt_low = 0.0f;
             _flt_band = 0.0f;
             _smooth_delay_samples = 48000.0f * 0.20f;
+            _lofi.Reset();
             for (size_t i = 0; i < kMaxDelay; ++i) _delay_buf[i] = 0.0f;
         }
 
@@ -277,7 +280,11 @@ public:
         // Smooth delay time with one-pole filter to guarantee ZERO read pointer tearing/noise!
         _smooth_delay_samples += 0.005f * (target_samples - _smooth_delay_samples);
 
-        float dly_read = ReadDelay(_smooth_delay_samples);
+        // Read raw buffer with smoothed interpolation
+        float raw_dly = ReadDelay(_smooth_delay_samples);
+        // Process through PT2399 clock downsampling, delta-slew, and op-amp filters
+        _lofi.Prepare(target_time, _v_dc[NodeVcc], _sample_rate);
+        float dly_read = _lofi.Process(raw_dly);
         _prev_dly_read = dly_read;
 
         // Feedback: normal knob setting + injected wet signal from P06 ↔ P07 bridge
@@ -348,6 +355,7 @@ private:
     float _prev_dly_read{0.0f};
     float _delay_buf[kMaxDelay];
     size_t _delay_write{0};
+    LoFiDelayModel _lofi;
 
     // Mix
     float _knob_mix_pos{0.50f};

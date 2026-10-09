@@ -35,33 +35,27 @@ struct LoFiDelayModel {
     }
 
     inline void Prepare(float delay_sec, float voltage, float sample_rate) {
-        // Voltage fader controls the delay clock frequency / sample rate.
-        // At voltage >= 0.85 (healthy upper rail): full 48 kHz pristine clean delay (bypassed).
-        // Below 0.85, downsampling drops smoothly from 48 kHz down to ~3.8 kHz at 0V,
-        // producing rich, metallic, gritty PT2399-style aliasing without any Doppler pitch wobble!
-        if (voltage >= 0.85f) {
-            active = false;
-            return;
-        }
+        // PT2399 clock behavior:
+        // As delay time increases past 100ms, the internal VCO clock slows down,
+        // producing signature metallic aliasing sidebands.
+        // Voltage starvation further drags the clock down into deep lo-fi crunch.
+        float time_factor = daisysp::fclamp((delay_sec - 0.08f) / 0.32f, 0.0f, 1.0f);
+        float base_clock = 1.0f - 0.65f * (time_factor * time_factor); // 1.0 down to 0.35
 
-        active = true;
-
-        // Normalized fader curve smoothly sweeps downsampling below 0.85:
-        float v_norm = daisysp::fclamp(voltage / 0.85f, 0.0f, 1.0f);
-        float delay_scale = 1.0f + daisysp::fclamp((delay_sec - 0.20f) / 3.0f, 0.0f, 0.4f);
+        float v_norm = daisysp::fclamp(voltage, 0.02f, 1.0f);
         float v_curved = v_norm * v_norm;
-        float min_clock = 0.08f / delay_scale;
-        clock_speed = daisysp::fclamp(min_clock + (1.0f - min_clock) * v_curved, 0.05f, 1.0f);
+
+        clock_speed = daisysp::fclamp(base_clock * (0.05f + 0.95f * v_curved), 0.04f, 1.0f);
+        active = (clock_speed < 0.98f);
 
         // Delta modulation slew limit: slope overload creates classic PT2399 1-bit compression and bite
-        // Slew limit scales with clock speed so aliasing stair-steps retain punchy transients
         float comb_blend = daisysp::fclamp((0.065f - delay_sec) / 0.020f, 0.0f, 1.0f);
         float base_slew = 0.14f * (1.0f - comb_blend) + 0.30f * comb_blend;
         max_slew = base_slew + 0.40f * (clock_speed * clock_speed);
 
-        // Dual-stage op-amp low-pass reconstruction filter (2.8 kHz to 7.5 kHz)
-        // Tracks clock speed to keep metallic aliasing sidebands bright and audible while removing supersonic noise
-        float cutoff = 2800.0f + 4700.0f * clock_speed;
+        // Dual-stage op-amp low-pass reconstruction filter (2.6 kHz to 6.8 kHz)
+        // Tracks clock speed to keep metallic aliasing sidebands warm and musical
+        float cutoff = 2600.0f + 4200.0f * clock_speed;
         alpha = daisysp::fclamp(cutoff * (6.2831853f / sample_rate), 0.02f, 0.85f);
     }
 
