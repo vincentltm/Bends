@@ -117,6 +117,7 @@ public:
         _rub_speed_p10 = 0.0f;
         _prev_p10_rub = 0.0f;
         _p10_tap_cooldown = 0;
+        _p10_settle_cooldown = 0;
         if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
             std::fill_n(_delay_buf_l, _max_delay, 0.0f);
             std::fill_n(_delay_buf_r, _max_delay, 0.0f);
@@ -200,14 +201,15 @@ public:
     void SetPressures(const float pressures[12]) {
         for (size_t i = 0; i < 12; ++i) {
             float p = pressures[i];
-            // Detect tap strikes (rising velocity)
+            // Detect tap strikes (rising velocity from rest)
             if (p > 0.15f && _prev_pressures[i] <= 0.05f) {
                 if (i == NodeAmp) {
                     _amp_pluck = 0.85f * (_knob_drive_pos + 0.25f);
                 } else if (i == NodeIn) {
-                    float vel = std::clamp((p - _prev_pressures[NodeIn]) * 3.5f, 0.20f, 1.0f);
+                    float vel = std::clamp((p - _prev_pressures[NodeIn]) * 2.8f, 0.15f, 1.0f);
                     _contact_mic.TriggerTap(vel, false);
-                    _p10_tap_cooldown = 35; // ~70ms cooldown to completely cover tap attack and release
+                    _p10_tap_cooldown = 24; // ~50ms cooldown: tap ring completely suppresses scratch
+                    _p10_settle_cooldown = 0;
                     _rub_speed_p10 = 0.0f;
                     _prev_p10_rub = p;
                 } else if (i == NodeFlt) {
@@ -224,6 +226,12 @@ public:
                         _rst_tap = true;
                     }
                 }
+            } else if (i == NodeIn && p > 0.05f && _prev_pressures[NodeIn] <= 0.05f) {
+                // Gentle landing without tap: touch settle window (~30ms)
+                _p10_settle_cooldown = 15;
+                _p10_tap_cooldown = 0;
+                _rub_speed_p10 = 0.0f;
+                _prev_p10_rub = p;
             }
             _pressures[i] = p;
             _prev_pressures[i] = p;
@@ -231,24 +239,30 @@ public:
 
         // Calculate rubbing / scratching velocity on Pad 10
         float p10 = _pressures[NodeIn];
-        if (p10 <= 0.06f) {
-            // Finger off pad or lifting off: instantly mute rub speed
+        if (p10 <= 0.05f) {
+            // Finger off pad or lifted: completely silent
             _rub_speed_p10 = 0.0f;
             _prev_p10_rub = p10;
+            _p10_tap_cooldown = 0;
+            _p10_settle_cooldown = 0;
         } else if (_p10_tap_cooldown > 0) {
             _p10_tap_cooldown--;
+            _rub_speed_p10 = 0.0f;
+            _prev_p10_rub = p10;
+        } else if (_p10_settle_cooldown > 0) {
+            _p10_settle_cooldown--;
             _rub_speed_p10 = 0.0f;
             _prev_p10_rub = p10;
         } else {
             float dp = std::abs(p10 - _prev_p10_rub);
             _prev_p10_rub = p10;
 
-            // Noise floor threshold on MPR121 ADC delta is ~0.003
-            if (dp > 0.005f) {
-                float motion = (dp - 0.005f) * 25.0f;
+            // Only register actual motion across the pad surface
+            if (dp > 0.004f) {
+                float motion = std::min(1.5f, (dp - 0.004f) * 28.0f);
                 _rub_speed_p10 += (motion - _rub_speed_p10) * 0.40f;
             } else {
-                _rub_speed_p10 *= 0.85f; // Smooth ~25ms release between back-and-forth strokes
+                _rub_speed_p10 *= 0.80f; // Rapid drop to 0 when finger stops moving
             }
         }
     }
@@ -1455,6 +1469,7 @@ private:
     float _rub_speed_p10{0.0f};
     float _prev_p10_rub{0.0f};
     uint16_t _p10_tap_cooldown{0};
+    uint16_t _p10_settle_cooldown{0};
 };
 
 } // namespace bends

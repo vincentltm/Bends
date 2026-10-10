@@ -45,7 +45,7 @@ public:
             s1 = 2.0f * v1 + s1;
             float v2 = g * band;
             s2 = 2.0f * v2 + s2;
-            return band;
+            return band * (2.0f * R); // Peak gain strictly normalized to 1.0 (0dB) at resonance
         }
 
         void Reset() { s1 = 0.0f; s2 = 0.0f; }
@@ -96,7 +96,7 @@ public:
         _trans_active = true;
         _trans_pos = 0.0f;
         _trans_vel = std::clamp(velocity, 0.05f, 1.0f);
-        _trans_type = is_sharp ? 1 : 0;
+        _trans_type = 0; // Pure authentic chassis tap
     }
 
     /**
@@ -109,14 +109,14 @@ public:
      * @param out_r Output right (contact mic signal)
      */
     inline void Process(float ext_l, float ext_r, float p10, float v_rub, float& out_l, float& out_r) {
-        // 1. Friction & Scratch Voice (Original Authentic Modeling)
+        // 1. Friction & Scratch Voice (Expressive Dynamic Control)
         _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.015f;
         float eff_rub = std::max(v_rub * 0.70f, _smooth_rub_speed);
 
         float scratch_sig = 0.0f;
-        if (eff_rub > 0.008f && p10 > 0.03f) {
+        if (eff_rub > 0.008f && p10 > 0.04f) {
             // Speed of scrub advances through recorded grain table
-            float scrub_rate = 0.20f + eff_rub * 1.8f;
+            float scrub_rate = 0.20f + eff_rub * 1.6f;
             _scratch_pos += scrub_rate;
             while (_scratch_pos >= static_cast<float>(kPiezoScratch_len - 1)) {
                 _scratch_pos -= static_cast<float>(kPiezoScratch_len - 1);
@@ -131,21 +131,22 @@ public:
             float s1 = static_cast<float>(kPiezoScratch[idx1]) / 128.0f;
             float grain_val = s0 + frac * (s1 - s0);
 
-            // Friction power: normal force (pressure) * rubbing velocity
-            float friction_power = std::min(1.0f, (0.15f + p10 * 0.85f) * eff_rub * 2.2f);
-
             // Stick-slip micro-crackle
             _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
             float noise = (static_cast<float>(_lfsr % 2001) - 1000.0f) / 1000.0f;
             float micro_slip = (std::abs(noise) > 0.88f) ? (noise * 0.35f) : 0.0f;
 
-            scratch_sig = (grain_val * 0.75f + micro_slip * 0.25f) * friction_power * 1.0f;
+            // Expressive dynamics: velocity squared gives natural dynamic response from whisper-soft to loud rasp
+            float vel_factor = std::clamp(eff_rub * 0.80f, 0.0f, 1.0f);
+            float press_factor = 0.20f + 0.80f * (p10 * p10);
+            float friction_power = (vel_factor * vel_factor) * press_factor;
+
+            scratch_sig = (grain_val * 0.75f + micro_slip * 0.25f) * friction_power * 0.85f;
         }
 
         // 2. Transient Tap Voice (Authentic Piezo Chassis Tap)
         float tap_sig = 0.0f;
         if (_trans_active) {
-            // 24kHz table played at 48kHz sample rate -> advance 0.5 samples/step
             _trans_pos += 0.50f;
             const int16_t table_len = kPiezoTap_len;
             const int8_t* table_data = kPiezoTap;
@@ -158,49 +159,41 @@ public:
                 float frac = _trans_pos - static_cast<float>(idx0);
                 float s0 = static_cast<float>(table_data[idx0]) / 128.0f;
                 float s1 = static_cast<float>(table_data[idx1]) / 128.0f;
-                tap_sig = (s0 + frac * (s1 - s0)) * _trans_vel * 0.85f;
+                tap_sig = (s0 + frac * (s1 - s0)) * _trans_vel * 0.60f;
             }
         }
 
-        // Combined tactile impact & scratch on P10 (top-left)
-        // Balanced physical chassis excitation:
-        // Left Disc is closer to P10 (0.65 direct energy)
-        // Right Disc receives chassis plate conduction (0.52 direct energy)
-        // Ratio = 1.25 (~1.9dB), creating a natural left-biased spatial image with rich stereo width
-        float tactile_in_l = (tap_sig + scratch_sig) * 0.65f;
-        float tactile_in_r = (tap_sig + scratch_sig) * 0.52f;
+        // Combined tactile impact & scratch on P10
+        // Balanced natural stereo:
+        // Left Disc: 0.60, Right Disc: 0.50 (~1.6dB natural left tilt)
+        float tactile_in_l = (tap_sig + scratch_sig) * 0.60f;
+        float tactile_in_r = (tap_sig + scratch_sig) * 0.50f;
 
         // 3. Capacitive High-Pass Loading & Surface Pressure Coupling
-        // Light touch: 120 Hz HP (thin/tinny piezo).
-        // Firm press: couples body mass down to 35 Hz with warm chest thump!
         float hp_freq = 120.0f * (1.0f - p10 * 0.70f);
         float hp_alpha = 1.0f / (1.0f + 6.2831853f * hp_freq / _sample_rate);
-        float sub_boost = 1.0f + p10 * 1.5f;
+        float sub_boost = 1.0f + p10 * 0.80f;
 
         // Left channel input
-        float raw_l = ext_l * 0.85f + tactile_in_l;
+        float raw_l = ext_l * 0.60f + tactile_in_l;
         _hp_state_l = hp_alpha * (_hp_state_l + raw_l);
         float sig_l = (raw_l - _hp_state_l) * sub_boost;
 
         // Right channel input
-        float raw_r = ext_r * 0.85f + tactile_in_r;
+        float raw_r = ext_r * 0.60f + tactile_in_r;
         _hp_state_r = hp_alpha * (_hp_state_r + raw_r);
         float sig_r = (raw_r - _hp_state_r) * sub_boost;
 
-        // 4. Acoustic Resonator Modes (Full Authentic Resonator Gain)
-        // Chassis cavity mode (278 Hz L, 286 Hz R)
+        // 4. Acoustic Resonator Modes (Normalized Peak Gain)
         float chas_l = _res_chassis_l.Process(sig_l);
         float chas_r = _res_chassis_r.Process(sig_r);
-
-        // Ceramic disc drumhead mode (3720 Hz L, 3810 Hz R)
         float ceram_l = _res_ceramic_l.Process(sig_l);
         float ceram_r = _res_ceramic_r.Process(sig_r);
 
-        float disc_out_l = sig_l * 0.55f + chas_l * 0.75f + ceram_l * 1.15f;
-        float disc_out_r = sig_r * 0.55f + chas_r * 0.75f + ceram_r * 1.15f;
+        float disc_out_l = sig_l * 0.40f + chas_l * 0.45f + ceram_l * 0.55f;
+        float disc_out_r = sig_r * 0.40f + chas_r * 0.45f + ceram_r * 0.55f;
 
         // 5. Solid Substrate Acoustic Wave Propagation (7-sample structural delay)
-        // Cross-coupled through 4.5 kHz material damping filter
         uint8_t read_idx = (_sub_idx + 1) & 7;
         float delayed_from_l = _sub_delay_l[read_idx];
         float delayed_from_r = _sub_delay_r[read_idx];
@@ -213,16 +206,17 @@ public:
         _cross_lp_l += 0.44f * (delayed_from_r - _cross_lp_l);
         _cross_lp_r += 0.44f * (delayed_from_l - _cross_lp_r);
 
-        float stereo_l = disc_out_l + _cross_lp_l * 0.28f;
-        float stereo_r = disc_out_r + _cross_lp_r * 0.28f;
+        float stereo_l = disc_out_l + _cross_lp_l * 0.25f;
+        float stereo_r = disc_out_r + _cross_lp_r * 0.25f;
 
-        // 6. Mechanical High-Frequency Damping (8.5 kHz solid-medium rolloff)
+        // 6. Mechanical High-Frequency Damping
         _lp_damp_l += 0.67f * (stereo_l - _lp_damp_l);
         _lp_damp_r += 0.67f * (stereo_r - _lp_damp_r);
 
         // 7. Asymmetric Non-Linear Piezoelectric Saturation
-        out_l = SaturatePiezo(_lp_damp_l * 0.68f);
-        out_r = SaturatePiezo(_lp_damp_r * 0.68f);
+        // Output trimmed to 0.48f for comfortable headroom matching preamp
+        out_l = SaturatePiezo(_lp_damp_l * 0.48f);
+        out_r = SaturatePiezo(_lp_damp_r * 0.48f);
     }
 
 private:
