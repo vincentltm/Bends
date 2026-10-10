@@ -58,6 +58,8 @@ public:
         _osc_phase = 0.0f;
         _osc_charging = true;
         _osc_mode = OSC_SAW;
+        _saw_ramp = 0.0f;
+        _saw_reset_pulse = 0.0f;
         _lfsr = 0xACE1u;
         _rnd_held = 0.0f;
 
@@ -473,6 +475,8 @@ public:
                 _slip_offset_r = 0.0f;
                 _was_frozen = false;
                 _freeze_phase = 0.0f;
+                _saw_ramp = 0.0f;
+                _saw_reset_pulse = 0.0f;
                 _inj_clk = 0.0f;
                 _inj_osc = 0.0f;
                 _lofi_l.Reset();
@@ -564,14 +568,17 @@ private:
             _sh_step_ratio = kShSteps[_lfsr % 6];
         }
 
+        _saw_reset_pulse = 0.0f;
         if (_osc_mode == OSC_SIN) {
             s_osc = std::sin(_osc_phase * kTwoPi) * std::min(1.0f, v_rail_eff * 1.5f);
+            _saw_ramp = 0.0f;
         } else if (_osc_mode == OSC_SAW) {
             float v_th_hi = 0.65f * v_rail_eff;
             float v_th_lo = 0.30f * v_rail_eff;
             float tau = 1.0f / (kTwoPi * std::max(0.1f, osc_freq));
             float k_charge = dt / tau;
-            float k_discharge = dt / (0.12f * tau);
+            // Rapid relaxation discharge: sharp flyback edge creates authentic acoustic transients
+            float k_discharge = dt / (0.012f * tau);
 
             if (v_rail_eff < 0.25f) {
                 float choke = (v_rail_eff / 0.25f);
@@ -580,17 +587,24 @@ private:
 
             if (_osc_charging) {
                 _osc_vc += (v_rail_eff - _osc_vc) * k_charge;
-                if (_osc_vc >= v_th_hi) _osc_charging = false;
+                if (_osc_vc >= v_th_hi) {
+                    _osc_charging = false;
+                    _saw_reset_pulse = 1.0f; // Single-sample transient pulse on flyback!
+                }
             } else {
                 _osc_vc -= _osc_vc * k_discharge;
-                if (_osc_vc <= v_th_lo) _osc_charging = true;
+                if (_osc_vc <= v_th_lo) {
+                    _osc_charging = true;
+                }
             }
 
             float span = std::max(0.005f, v_th_hi - v_th_lo);
             float norm_vc = std::clamp((_osc_vc - v_th_lo) / span, 0.0f, 1.0f);
+            _saw_ramp = norm_vc;
             s_osc = (2.0f * norm_vc - 1.0f) * std::min(1.0f, v_rail_eff * 1.5f);
         } else {
             s_osc = _rnd_held * std::min(1.0f, v_rail_eff * 1.5f);
+            _saw_ramp = 0.0f;
         }
         s_osc *= _shunt_gnd_smooth[NodeOsc];
     }
@@ -708,7 +722,14 @@ private:
 
         float inj_flt_avg = (s_inj_flt[0] + s_inj_flt[1]) * 0.5f;
         float flt_freq = (35.0f * FastPow2(flt_dc * 8.6f)) * flt_v_scale;
-        if (inj_flt_avg != 0.0f) {
+
+        // P03 (OSC) <-> P04 (FLT) Bending:
+        float g_osc_flt = _bridge_g[NodeOsc][NodeFlt];
+        if (g_osc_flt > 0.015f && _osc_mode == OSC_SAW) {
+            // Saw Ramp: unipolar upward envelope sweep sweeping cutoff up by up to +4.5 octaves!
+            float saw_flt_ramp = _saw_ramp * 4.5f * g_osc_flt;
+            flt_freq *= FastPow2(saw_flt_ramp);
+        } else if (inj_flt_avg != 0.0f) {
             flt_freq *= FastPow2(inj_flt_avg * 1.5f);
         }
         flt_freq = std::clamp(flt_freq, 25.0f, 19000.0f);
@@ -718,6 +739,16 @@ private:
         float flt_drive = 1.0f + _bridge_g[NodeAmp][NodeFlt] * 2.2f + starve_drive;
         float flt_in_l = (amp_out_l * flt_drive + s_inj_flt[0] * 0.70f);
         float flt_in_r = (amp_out_r * flt_drive + s_inj_flt[1] * 0.70f);
+
+        // P03 (OSC in Saw) <-> P04 (FLT): sharp saw flyback edge pings the resonant filter core!
+        if (g_osc_flt > 0.015f && _osc_mode == OSC_SAW && _saw_reset_pulse > 0.0f) {
+            float saw_ping = _saw_reset_pulse * g_osc_flt * 0.85f;
+            _flt_s1_l += saw_ping;
+            _flt_s1_r += saw_ping;
+            flt_in_l += saw_ping * 1.5f;
+            flt_in_r += saw_ping * 1.5f;
+            _flt_ping_env = std::max(_flt_ping_env, g_osc_flt * 0.95f);
+        }
 
         // Ping impulse injection & resonance decay envelope
         if (_flt_ping > 0.001f) {
@@ -1092,6 +1123,12 @@ private:
         base_fb += standalone_p_fbk * 0.30f;
         float flt_fb_boost = _bridge_g[NodeFlt][NodeFbk] * 0.65f;
         float eff_fb = (base_fb + flt_fb_boost) * _shunt_gnd_smooth[NodeFbk];
+
+        // Karplus-Strong string resonance: elevated feedback when exciting string with saw
+        if (u < 0.20f && g_osc_dly > 0.015f && _osc_mode == OSC_SAW) {
+            float karplus_fb = 0.965f + 0.026f * g_osc_dly;
+            eff_fb = std::max(eff_fb, karplus_fb * g_osc_dly);
+        }
         eff_fb = std::clamp(eff_fb, 0.0f, 1.40f);
 
         // Ping-pong cross-feed on DLY <-> FBK bridge (P06 <-> P07)
@@ -1104,11 +1141,42 @@ private:
         float fb_tot_l = fb_direct_l + fb_cross_l;
         float fb_tot_r = fb_direct_r + fb_cross_r;
 
+        // P04 (FLT) <-> P07 (FBK) Dub Delay Loop:
+        // Routes the delay feedback path through the resonant SVF filter!
+        float g_flt_fbk = _bridge_g[NodeFlt][NodeFbk];
+        if (g_flt_fbk > 0.015f) {
+            fb_tot_l = fb_tot_l * (1.0f - g_flt_fbk) + flt_low_l * eff_fb * g_flt_fbk * 1.05f;
+            fb_tot_r = fb_tot_r * (1.0f - g_flt_fbk) + flt_low_r * eff_fb * g_flt_fbk * 1.05f;
+        }
+
         // Bridge inputs directly into delay buffer
         float amp_to_dly_l = _bridge_g[NodeAmp][NodeDly] * amp_out_l * 1.5f;
         float amp_to_dly_r = _bridge_g[NodeAmp][NodeDly] * amp_out_r * 1.5f;
         float flt_to_dly_l = _bridge_g[NodeFlt][NodeDly] * flt_low_l * 1.2f;
         float flt_to_dly_r = _bridge_g[NodeFlt][NodeDly] * flt_low_r * 1.2f;
+
+        // P03 (OSC) <-> P06 (DLY) buffer excitation:
+        // In Karplus zone (< 25ms): saw flyback edge injects sharp string pluck excitation!
+        // In Echo zone: injects rhythmic saw echoes into loop
+        float osc_to_dly_l = 0.0f;
+        float osc_to_dly_r = 0.0f;
+        if (g_osc_dly > 0.015f) {
+            if (_osc_mode == OSC_SAW) {
+                if (u < 0.20f) {
+                    float saw_pluck = _saw_reset_pulse * g_osc_dly * 0.92f;
+                    float saw_continuous = s_osc * g_osc_dly * 0.22f;
+                    osc_to_dly_l = saw_pluck + saw_continuous;
+                    osc_to_dly_r = saw_pluck + saw_continuous;
+                } else {
+                    float saw_echo = (s_osc * 0.35f + _saw_reset_pulse * 0.50f) * g_osc_dly;
+                    osc_to_dly_l = saw_echo;
+                    osc_to_dly_r = saw_echo;
+                }
+            } else {
+                osc_to_dly_l = s_osc * g_osc_dly * 0.45f;
+                osc_to_dly_r = s_osc * g_osc_dly * 0.45f;
+            }
+        }
 
         // Non-destructive Freeze & Low-Voltage Memory Glitch:
         // When _is_frozen is true OR under deep starve / VCC<->DLY glitch OR during RST<->GND clear,
@@ -1116,8 +1184,8 @@ private:
         // All bends operate live on readhead pointers and DAC, preserving the captured audio loop forever.
         bool delay_write_inhibited = _is_frozen || (glitch_intensity > 0.15f) || (_rst_gnd_hold > 0);
         if (!delay_write_inhibited) {
-            float dly_in_l = flt_low_l + amp_to_dly_l + flt_to_dly_l + FastTanh(fb_tot_l);
-            float dly_in_r = flt_low_r + amp_to_dly_r + flt_to_dly_r + FastTanh(fb_tot_r);
+            float dly_in_l = flt_low_l + amp_to_dly_l + flt_to_dly_l + osc_to_dly_l + FastTanh(fb_tot_l);
+            float dly_in_r = flt_low_r + amp_to_dly_r + flt_to_dly_r + osc_to_dly_r + FastTanh(fb_tot_r);
             dly_in_l = _dc_block_dly_l.Process(dly_in_l);
             dly_in_r = _dc_block_dly_r.Process(dly_in_r);
             WriteDelay_Stereo(dly_in_l, dly_in_r);
@@ -1148,6 +1216,16 @@ private:
 
         out_l = ((1.0f - mix_wet) * dry_l + mix_wet * dly_dac_l + (mix_direct_tap_l + out_direct_tap_l) * 0.45f) * _shunt_gnd_smooth[NodeMix] * _shunt_gnd_smooth[NodeOut] * 0.75f;
         out_r = ((1.0f - mix_wet) * dry_r + mix_wet * dly_dac_r + (mix_direct_tap_r + out_direct_tap_r) * 0.45f) * _shunt_gnd_smooth[NodeMix] * _shunt_gnd_smooth[NodeOut] * 0.75f;
+
+        // P09 (MIX) <-> P04 (FLT) Master Output Filter Isolator:
+        // When MIX is bridged to FLT, the master mixed audio (wet delay + dry mix) is routed through the Filter!
+        float g_flt_mix = _bridge_g[NodeFlt][NodeMix];
+        if (g_flt_mix > 0.015f) {
+            float flt_master_l = flt_low_l * _shunt_gnd_smooth[NodeMix] * _shunt_gnd_smooth[NodeOut] * 0.85f;
+            float flt_master_r = flt_low_r * _shunt_gnd_smooth[NodeMix] * _shunt_gnd_smooth[NodeOut] * 0.85f;
+            out_l = out_l * (1.0f - g_flt_mix) + flt_master_l * g_flt_mix;
+            out_r = out_r * (1.0f - g_flt_mix) + flt_master_r * g_flt_mix;
+        }
     }
 
     inline float QuantizeDac(float in, float levels, float inv, float dnl) const {
@@ -1237,6 +1315,8 @@ private:
     float   _osc_phase{0.0f};
     float   _osc_vc{0.0f};
     bool    _osc_charging{true};
+    float   _saw_ramp{0.0f};
+    float   _saw_reset_pulse{0.0f};
     uint16_t _lfsr{0xACE1u};
     float   _rnd_held{0.0f};
     float   _inj_osc{0.0f};
