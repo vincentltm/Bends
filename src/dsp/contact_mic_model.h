@@ -87,9 +87,15 @@ public:
         _trans_vel = 0.0f;
         _trans_type = 0;
 
-        _scratch_pos = 0.0f;
+        _pos_a = 0.0f;
+        _pos_b = 217.3f;
+        _drift_a = 0.0f;
+        _drift_b = 0.0f;
+        _pink_b0 = 0.0f;
+        _pink_b1 = 0.0f;
+        _pink_b2 = 0.0f;
+        _rng = 0x93A11234u;
         _smooth_rub_speed = 0.0f;
-        _lfsr = 0x93A1u;
     }
 
     void TriggerTap(float velocity, bool is_sharp = false) {
@@ -109,39 +115,63 @@ public:
      * @param out_r Output right (contact mic signal)
      */
     inline void Process(float ext_l, float ext_r, float p10, float v_rub, float& out_l, float& out_r) {
-        // 1. Friction & Scratch Voice (Expressive Dynamic Control)
-        _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.015f;
-        float eff_rub = std::max(v_rub * 0.70f, _smooth_rub_speed);
+        // 1. Friction & Scratch Voice (Cadence-Compensated Physical Friction)
+        _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.012f;
+        float eff_rub = std::max(v_rub * 0.65f, _smooth_rub_speed);
 
         float scratch_sig = 0.0f;
-        if (eff_rub > 0.008f && p10 > 0.04f) {
-            // Speed of scrub advances through recorded grain table
-            float scrub_rate = 0.20f + eff_rub * 1.6f;
-            _scratch_pos += scrub_rate;
-            while (_scratch_pos >= static_cast<float>(kPiezoScratch_len - 1)) {
-                _scratch_pos -= static_cast<float>(kPiezoScratch_len - 1);
-            }
+        if (eff_rub > 0.005f && p10 > 0.04f) {
+            // Speed of scrub advances dual asynchronous irrational heads through seamless loop
+            float base_rate = 0.35f + eff_rub * 0.85f;
 
-            int idx0 = static_cast<int>(_scratch_pos);
-            int idx1 = idx0 + 1;
-            if (idx1 >= kPiezoScratch_len) idx1 = 0;
-            float frac = _scratch_pos - static_cast<float>(idx0);
+            // Xorshift32 PRNG (3 CPU cycles)
+            _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
+            float white = static_cast<float>(static_cast<int32_t>(_rng)) * (1.0f / 2147483648.0f);
 
-            float s0 = static_cast<float>(kPiezoScratch[idx0]) / 128.0f;
-            float s1 = static_cast<float>(kPiezoScratch[idx1]) / 128.0f;
-            float grain_val = s0 + frac * (s1 - s0);
+            // Subtle continuous micro-drift on playback heads (completely eliminates static drone)
+            _drift_a += (white * 0.05f - _drift_a) * 0.001f;
+            _drift_b += (-white * 0.05f - _drift_b) * 0.001f;
 
-            // Stick-slip micro-crackle
-            _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
-            float noise = (static_cast<float>(_lfsr % 2001) - 1000.0f) / 1000.0f;
-            float micro_slip = (std::abs(noise) > 0.88f) ? (noise * 0.35f) : 0.0f;
+            _pos_a += base_rate * (1.0f + _drift_a);
+            if (_pos_a >= 512.0f) _pos_a -= 512.0f;
+            if (_pos_a < 0.0f) _pos_a += 512.0f;
+
+            // Head B runs at irrational ratio sqrt(2) ~ 1.41421356 so heads never align periodically
+            _pos_b += base_rate * 1.41421356f * (1.0f + _drift_b);
+            if (_pos_b >= 512.0f) _pos_b -= 512.0f;
+            if (_pos_b < 0.0f) _pos_b += 512.0f;
+
+            int ia0 = static_cast<int>(_pos_a);
+            int ia1 = (ia0 + 1) & 511;
+            float fa = _pos_a - static_cast<float>(ia0);
+            float sa = (static_cast<float>(kPiezoScratch[ia0]) + fa * (static_cast<float>(kPiezoScratch[ia1]) - static_cast<float>(kPiezoScratch[ia0]))) * (1.0f / 128.0f);
+
+            int ib0 = static_cast<int>(_pos_b);
+            int ib1 = (ib0 + 1) & 511;
+            float fb = _pos_b - static_cast<float>(ib0);
+            float sb = (static_cast<float>(kPiezoScratch[ib0]) + fb * (static_cast<float>(kPiezoScratch[ib1]) - static_cast<float>(kPiezoScratch[ib0]))) * (1.0f / 128.0f);
+
+            float table_mix = 0.5f * (sa + sb);
+
+            // Continuous velvety pink friction noise (Kellet 3-pole filter)
+            _pink_b0 = 0.99765f * _pink_b0 + white * 0.0555179f;
+            _pink_b1 = 0.96300f * _pink_b1 + white * 0.1538520f;
+            _pink_b2 = 0.57000f * _pink_b2 + white * 0.5329522f;
+            float pink = (_pink_b0 + _pink_b1 + _pink_b2 + white * 0.5362f) * 0.22f;
+
+            // Composite friction excitation
+            float friction_raw = table_mix * 0.60f + pink * 0.40f;
 
             // Expressive dynamics: velocity squared gives natural dynamic response from whisper-soft to loud rasp
-            float vel_factor = std::clamp(eff_rub * 0.80f, 0.0f, 1.0f);
+            float vel_factor = std::clamp(eff_rub * 0.85f, 0.0f, 1.0f);
             float press_factor = 0.20f + 0.80f * (p10 * p10);
             float friction_power = (vel_factor * vel_factor) * press_factor;
 
-            scratch_sig = (grain_val * 0.75f + micro_slip * 0.25f) * friction_power * 0.85f;
+            scratch_sig = friction_raw * friction_power * 0.80f;
+        } else {
+            _pink_b0 *= 0.95f;
+            _pink_b1 *= 0.95f;
+            _pink_b2 *= 0.95f;
         }
 
         // 2. Transient Tap Voice (Authentic Piezo Chassis Tap)
@@ -254,10 +284,16 @@ private:
     float   _trans_vel{0.0f};
     uint8_t _trans_type{0}; // 0 = tap, 1 = click
 
-    // Scratch Grain Scrubber Voice
-    float    _scratch_pos{0.0f};
+    // Scratch Dual-Head Friction Synthesizer
+    float    _pos_a{0.0f};
+    float    _pos_b{217.3f};
+    float    _drift_a{0.0f};
+    float    _drift_b{0.0f};
+    float    _pink_b0{0.0f};
+    float    _pink_b1{0.0f};
+    float    _pink_b2{0.0f};
+    uint32_t _rng{0x93A11234u};
     float    _smooth_rub_speed{0.0f};
-    uint16_t _lfsr{0x93A1u};
 };
 
 } // namespace synthux

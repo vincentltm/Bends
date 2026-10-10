@@ -258,11 +258,11 @@ public:
             _prev_p10_rub = p10;
 
             // Only register actual motion across the pad surface
-            if (dp > 0.004f) {
-                float motion = std::min(1.5f, (dp - 0.004f) * 28.0f);
-                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.40f;
+            if (dp > 0.003f) {
+                float motion = std::min(1.5f, (dp - 0.003f) * 25.0f);
+                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.25f;
             } else {
-                _rub_speed_p10 *= 0.80f; // Rapid drop to 0 when finger stops moving
+                _rub_speed_p10 *= 0.985f; // Smooth physical momentum glide across MPR121 polling cadence
             }
         }
     }
