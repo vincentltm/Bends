@@ -471,7 +471,7 @@ public:
         // 5. Preamp Stage: receives external audio + NodeIn injections (e.g. OUT->IN feedback) + AMP injections
         float amp_out_l = 0.0f;
         float amp_out_r = 0.0f;
-        ProcessPreamp(ext_l, ext_r, s_inj[NodeAmp], s_inj[NodeIn], total_ground_hum, v_rail_eff, starve, pad_standalone_p[NodeAmp], amp_out_l, amp_out_r);
+        ProcessPreamp(ext_l, ext_r, s_inj[NodeAmp], s_inj[NodeIn], s_osc, s_clk, total_ground_hum, v_rail_eff, starve, pad_standalone_p[NodeAmp], amp_out_l, amp_out_r);
         _prev_amp_out_l = amp_out_l;
         _prev_amp_out_r = amp_out_r;
 
@@ -616,7 +616,7 @@ private:
     }
 
     // 4. Preamp Stage
-    inline void ProcessPreamp(float ext_l, float ext_r, const float s_inj_amp[2], const float s_inj_in[2], float total_ground_hum, float v_rail_eff, float starve, float standalone_p_amp, float& amp_out_l, float& amp_out_r) {
+    inline void ProcessPreamp(float ext_l, float ext_r, const float s_inj_amp[2], const float s_inj_in[2], float s_osc, float s_clk, float total_ground_hum, float v_rail_eff, float starve, float standalone_p_amp, float& amp_out_l, float& amp_out_r) {
         float u = _v_dc_smooth[NodeAmp];
         // Input volume: full mute below 0.04 for dead-quiet silent floor
         float in_vol = (u < 0.04f) ? 0.0f : std::clamp((u - 0.04f) / 0.96f, 0.0f, 1.0f);
@@ -650,8 +650,9 @@ private:
         float comp = 1.35f / std::pow(1.0f + drive, 0.44f);
         float out_gain = comp * (1.0f - 0.25f * starve) * _shunt_gnd_smooth[NodeAmp];
 
-        // OSC <-> CLK bridge (P03 <-> P00): injects oscillator/clock heterodyne tone into preamp
-        float osc_clk_bleed = _inj_clk * 0.40f;
+        // OSC <-> CLK bridge (P03 <-> P00): injects oscillator and clock heterodyne carrier into preamp
+        float g_osc_clk = _bridge_g[NodeOsc][NodeClk];
+        float osc_clk_bleed = g_osc_clk * (s_osc * 0.45f + s_clk * 0.22f);
 
         auto process_channel = [&](float ext_in, float inj_amp, float inj_in, DcBlocker& dc_block) -> float {
             float amp_in = ext_in * in_vol + inj_in * 0.85f + inj_amp * 0.90f + osc_clk_bleed + total_ground_hum * in_vol + pluck_sig + mb_sig;
@@ -980,7 +981,8 @@ private:
 
         // OSC <-> CLK (P03 <-> P00) bridge: audio-rate FM on the delay converter clock!
         // Creates vintage PT2399 clock heterodyne sidebands and ring-mod bells on delay audio
-        float osc_clk_fm = _inj_clk * 0.35f;
+        float g_osc_clk = _bridge_g[NodeOsc][NodeClk];
+        float osc_clk_fm = g_osc_clk * s_osc * 0.35f;
 
         // Standalone touch on Pad 0 drags clock down dynamically under finger pressure
         float eff_clk_speed = clk_fader_speed * (1.0f - standalone_p_clk * 0.75f) - fast_clk_decim + osc_clk_fm;
