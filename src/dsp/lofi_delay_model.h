@@ -31,32 +31,28 @@ struct LoFiDelayModel {
         clock_speed = 1.0f;
         max_slew = 0.40f;
         alpha = 0.45f;
-        active = false;
+        active = true;
     }
 
-    inline void Prepare(float delay_sec, float voltage, float sample_rate) {
-        // PT2399 clock behavior:
-        // As delay time increases past 100ms, the internal VCO clock slows down,
-        // producing signature metallic aliasing sidebands.
-        // Voltage starvation further drags the clock down into deep lo-fi crunch.
-        float time_factor = daisysp::fclamp((delay_sec - 0.08f) / 0.32f, 0.0f, 1.0f);
-        float base_clock = 1.0f - 0.65f * (time_factor * time_factor); // 1.0 down to 0.35
-
+    inline void Prepare(float /*delay_sec*/, float clock_ratio, float voltage, float sample_rate) {
+        // Digital clock decimation driven by master clock and voltage
         float v_norm = daisysp::fclamp(voltage, 0.02f, 1.0f);
-        float v_curved = v_norm * v_norm;
+        clock_speed = daisysp::fclamp(clock_ratio * (0.20f + 0.80f * v_norm), 0.04f, 1.0f);
+        active = true;
 
-        clock_speed = daisysp::fclamp(base_clock * (0.05f + 0.95f * v_curved), 0.04f, 1.0f);
-        active = (clock_speed < 0.98f);
+        if (clock_speed >= 0.96f && v_norm >= 0.90f) {
+            // High clock speed: pristine clean fidelity, transparent bandwidth
+            max_slew = 10.0f;
+            alpha = 0.95f;
+        } else {
+            // Digital downsampling: keep transients punchy and bandwidth open
+            // Allows bright, gritty aliasing mirror frequencies without muffled choke
+            max_slew = 1.5f + 8.5f * (clock_speed * clock_speed);
 
-        // Delta modulation slew limit: slope overload creates classic PT2399 1-bit compression and bite
-        float comb_blend = daisysp::fclamp((0.065f - delay_sec) / 0.020f, 0.0f, 1.0f);
-        float base_slew = 0.14f * (1.0f - comb_blend) + 0.30f * comb_blend;
-        max_slew = base_slew + 0.40f * (clock_speed * clock_speed);
-
-        // Dual-stage op-amp low-pass reconstruction filter (2.6 kHz to 6.8 kHz)
-        // Tracks clock speed to keep metallic aliasing sidebands warm and musical
-        float cutoff = 2600.0f + 4200.0f * clock_speed;
-        alpha = daisysp::fclamp(cutoff * (6.2831853f / sample_rate), 0.02f, 0.85f);
+            // Op-amp reconstruction filter stays bright (8.0 kHz to 20 kHz)
+            float cutoff = 8000.0f + 12000.0f * clock_speed;
+            alpha = daisysp::fclamp(cutoff * (6.2831853f / sample_rate), 0.10f, 0.95f);
+        }
     }
 
     inline float Process(float in) {
@@ -68,7 +64,16 @@ struct LoFiDelayModel {
             return in;
         }
 
-        // 1. Clock sample-and-hold (downsampling aliasing)
+        // Pristine pass-through at nominal clock
+        if (clock_speed >= 0.98f && max_slew > 5.0f) {
+            hold_sample = in;
+            integrator = in;
+            lp1 = in;
+            lp2 = in;
+            return in;
+        }
+
+        // 1. Clock sample-and-hold (metallic downsampling & mirror frequencies)
         clock_phase += clock_speed;
         if (clock_phase >= 1.0f) {
             clock_phase -= 1.0f;

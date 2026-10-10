@@ -1,7 +1,7 @@
 #include "daisy_seed.h"
 #include "touch/touch.h"
-#include "engine/bends_engine_v2.h"
-#include "engine/bends_controller_v2.h"
+#include "engine/bends_engine.h"
+#include "engine/bends_controller.h"
 
 using namespace daisy;
 using namespace synthux;
@@ -9,8 +9,12 @@ using namespace bends;
 
 static DaisySeed hw;
 static Touch touch;
-static BendsEngineV2 engine;
-static BendsControllerV2 controller;
+static BendsEngine engine;
+static BendsController controller;
+
+// External SDRAM stereo delay buffers: 16.0s at 48kHz each (2 x 768,000 samples = 6.14 MB in 64MB SDRAM)
+static float DSY_SDRAM_BSS g_sdram_delay_buffer_l[SynthCircuit::kMaxDelay];
+static float DSY_SDRAM_BSS g_sdram_delay_buffer_r[SynthCircuit::kMaxDelay];
 
 void AudioCallback(AudioHandle::InputBuffer in,
                    AudioHandle::OutputBuffer out,
@@ -19,7 +23,7 @@ void AudioCallback(AudioHandle::InputBuffer in,
     controller.UpdateLedPwm(hw);
 }
 
-static void SendTelemetry(DaisySeed& hw, Touch& touch, BendsEngineV2& engine, uint32_t frame) {
+static void SendTelemetry(DaisySeed& hw, Touch& touch, BendsEngine& engine, uint32_t frame) {
     uint32_t slot = frame % 4;
     if (slot == 0) {
         hw.PrintLine("P %d %d %d %d %d %d %d %d %d %d %d %d",
@@ -78,11 +82,18 @@ static void SendTelemetry(DaisySeed& hw, Touch& touch, BendsEngineV2& engine, ui
     }
 }
 
+static bool g_telemetry_enabled = false;
+
 static void UsbRxCallback(uint8_t* buff, uint32_t* length) {
     if (buff && length && *length > 0) {
         for (uint32_t i = 0; i < *length; ++i) {
-            if (buff[i] == 'b' || buff[i] == 'B' || buff[i] == 'd' || buff[i] == 'D') {
+            uint8_t c = buff[i];
+            if (c == 'b' || c == 'B' || c == 'd' || c == 'D') {
                 System::ResetToBootloader(System::BootloaderMode::STM);
+            } else if (c == 't' || c == 'T' || c == '1') {
+                g_telemetry_enabled = true;
+            } else if (c == 'x' || c == 'X' || c == '0') {
+                g_telemetry_enabled = false;
             }
         }
     }
@@ -93,12 +104,16 @@ int main(void) {
     // Enable Cortex-M7 FPU Flush-to-Zero (FZ) and Default NaN (DN) modes to handle denormals.
     __set_FPSCR(__get_FPSCR() | (1 << 24) | (1 << 25));
 
+    // Zero out SDRAM stereo delay buffers after SDRAM controller initialization
+    memset(g_sdram_delay_buffer_l, 0, sizeof(g_sdram_delay_buffer_l));
+    memset(g_sdram_delay_buffer_r, 0, sizeof(g_sdram_delay_buffer_r));
+
     // 64-sample block size (1.33 ms)
     hw.SetAudioBlockSize(64);
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
     touch.Init(hw);
-    engine.Init(hw.AudioSampleRate(), 64);
+    engine.Init(hw.AudioSampleRate(), 64, g_sdram_delay_buffer_l, g_sdram_delay_buffer_r, SynthCircuit::kMaxDelay);
     controller.Init(&engine);
 
     // Calibrate baseline tracking on startup
@@ -132,8 +147,9 @@ int main(void) {
         touch.Process();
         controller.Process(hw, touch, loop_counter);
 
-        if ((loop_counter % 8) == 0) {
-            SendTelemetry(hw, touch, engine, (loop_counter / 8) % 4);
+        // Only stream telemetry if an external visualizer/host explicitly enabled it with 't'
+        if (g_telemetry_enabled && (loop_counter % 16) == 0) {
+            SendTelemetry(hw, touch, engine, (loop_counter / 16) % 4);
         }
 
         loop_counter++;

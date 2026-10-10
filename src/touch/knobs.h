@@ -42,6 +42,7 @@ public:
 
 private:
     std::array<daisy::AnalogControl, 8> _knobs;
+    std::array<float, 8> _filtered{};
     std::array<float, 8> _values{};
 };
 

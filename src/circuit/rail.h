@@ -32,12 +32,13 @@ public:
         float r_internal = 0.05f + 0.90f * starve_factor * starve_factor;
 
         // Target voltage accounts for fader, current draw, and DC pull from network (e.g. VCC-GND short)
-        float v_target = _fader_vcc - r_internal * external_load + network_vcc_pull * 0.5f;
+        float pull_effect = (network_vcc_pull < 0.0f) ? (network_vcc_pull * 1.0f) : (network_vcc_pull * 0.5f);
+        float v_target = _fader_vcc - r_internal * external_load + pull_effect;
         v_target = std::clamp(v_target, 0.02f, 1.0f);
 
-        // Responsive reservoir capacitor: fast discharge on heavy draw (0.25), smooth recovery (0.12)
+        // Responsive reservoir capacitor: fast discharge on short/draw (0.35), smooth recovery (0.10)
         // Provides immediate physical response with zero sluggish lag
-        float alpha = (v_target < _cap_voltage) ? 0.25f : 0.12f;
+        float alpha = (v_target < _cap_voltage) ? 0.35f : 0.10f;
         _cap_voltage += alpha * (v_target - _cap_voltage);
 
         // Brownout hysteresis comparator

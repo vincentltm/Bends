@@ -10,7 +10,7 @@ namespace bends {
  * Uses integer power of two exponent extraction and a 3rd-order polynomial on [0, 1].
  */
 inline float FastPow2(float x) {
-    float clamped = daisysp::fclamp(x, -12.0f, 12.0f);
+    float clamped = daisysp::fclamp(x, -30.0f, 30.0f);
     int i = static_cast<int>(clamped);
     float f = clamped - static_cast<float>(i);
     if (f < 0.0f) {
