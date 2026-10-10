@@ -116,6 +116,7 @@ public:
         _contact_mic.Init(sample_rate);
         _rub_speed_p10 = 0.0f;
         _prev_p10_rub = 0.0f;
+        _p10_tap_cooldown = 0;
         if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
             std::fill_n(_delay_buf_l, _max_delay, 0.0f);
             std::fill_n(_delay_buf_r, _max_delay, 0.0f);
@@ -207,6 +208,8 @@ public:
                     float vel = std::clamp((p - _prev_pressures[NodeIn]) * 3.5f, 0.20f, 1.0f);
                     bool sharp = (p > 0.60f);
                     _contact_mic.TriggerTap(vel, sharp);
+                    _p10_tap_cooldown = 15; // ~35ms cooldown to suppress scratch on initial tap attack
+                    _rub_speed_p10 = 0.0f;
                 } else if (i == NodeFlt) {
                     _flt_ping = 0.75f;
                 } else if (i == NodeRst) {
@@ -227,9 +230,27 @@ public:
         }
 
         // Calculate rubbing / scratching velocity on Pad 10
-        float delta_p10 = std::abs(_pressures[NodeIn] - _prev_p10_rub);
-        _rub_speed_p10 = std::min(2.5f, delta_p10 * 25.0f);
-        _prev_p10_rub = _pressures[NodeIn];
+        float p10 = _pressures[NodeIn];
+        if (p10 < 0.02f) {
+            // Finger lifted off: instant reset
+            _rub_speed_p10 = 0.0f;
+            _prev_p10_rub = p10;
+        } else if (_p10_tap_cooldown > 0) {
+            _p10_tap_cooldown--;
+            _rub_speed_p10 = 0.0f;
+            _prev_p10_rub = p10;
+        } else {
+            float dp = std::abs(p10 - _prev_p10_rub);
+            _prev_p10_rub = p10;
+
+            // Noise floor threshold on MPR121 ADC delta is ~0.003
+            if (dp > 0.0035f) {
+                float motion = (dp - 0.0035f) * 35.0f;
+                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.45f;
+            } else {
+                _rub_speed_p10 *= 0.90f; // Smooth ~30ms release between back-and-forth strokes
+            }
+        }
     }
 
     void SetActiveBridges(const ActiveBridge* bridges, uint8_t count) {
@@ -1433,6 +1454,7 @@ private:
     synthux::ContactMicModel _contact_mic;
     float _rub_speed_p10{0.0f};
     float _prev_p10_rub{0.0f};
+    uint16_t _p10_tap_cooldown{0};
 };
 
 } // namespace bends

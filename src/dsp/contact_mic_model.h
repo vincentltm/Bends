@@ -110,13 +110,15 @@ public:
      */
     inline void Process(float ext_l, float ext_r, float p10, float v_rub, float& out_l, float& out_r) {
         // 1. Friction & Scratch Voice
-        _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.015f;
+        _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.005f;
         float eff_rub = std::max(v_rub * 0.70f, _smooth_rub_speed);
 
         float scratch_sig = 0.0f;
-        if (eff_rub > 0.005f && p10 > 0.02f) {
+        // Natural threshold: only active when finger is rubbing (eff_rub > 0.015f)
+        if (eff_rub > 0.015f && p10 > 0.03f) {
+            float norm_rub = std::clamp((eff_rub - 0.015f) / 0.985f, 0.0f, 2.0f);
             // Speed of scrub advances through recorded grain table
-            float scrub_rate = 0.20f + eff_rub * 1.8f;
+            float scrub_rate = 0.35f + norm_rub * 1.4f;
             _scratch_pos += scrub_rate;
             while (_scratch_pos >= static_cast<float>(kPiezoScratch_len - 1)) {
                 _scratch_pos -= static_cast<float>(kPiezoScratch_len - 1);
@@ -131,15 +133,15 @@ public:
             float s1 = static_cast<float>(kPiezoScratch[idx1]) / 128.0f;
             float grain_val = s0 + frac * (s1 - s0);
 
-            // Friction power: Normal force (pressure) * rubbing velocity
-            float friction_power = std::min(1.0f, (0.15f + p10 * 0.85f) * eff_rub * 2.2f);
+            // Friction power: normal force * scrub intensity
+            float friction_power = (0.25f + p10 * 0.75f) * std::min(1.2f, norm_rub);
 
             // Stick-slip micro-crackle
             _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
             float noise = (static_cast<float>(_lfsr % 2001) - 1000.0f) / 1000.0f;
-            float micro_slip = (std::abs(noise) > 0.88f) ? (noise * 0.35f) : 0.0f;
+            float micro_slip = (std::abs(noise) > 0.85f) ? (noise * 0.30f) : 0.0f;
 
-            scratch_sig = (grain_val * 0.75f + micro_slip * 0.25f) * friction_power * 1.1f;
+            scratch_sig = (grain_val * 0.75f + micro_slip * 0.25f) * friction_power * 0.65f;
         }
 
         // 2. Transient Tap Voice
@@ -158,29 +160,32 @@ public:
                 float frac = _trans_pos - static_cast<float>(idx0);
                 float s0 = static_cast<float>(table_data[idx0]) / 128.0f;
                 float s1 = static_cast<float>(table_data[idx1]) / 128.0f;
-                tap_sig = (s0 + frac * (s1 - s0)) * _trans_vel * 0.95f;
+                tap_sig = (s0 + frac * (s1 - s0)) * _trans_vel * 0.42f;
             }
         }
 
         // Combined tactile impact & scratch on P10 (top-left)
-        // Direct coupling strongly into Left (0.95), subtle acoustic bleed into Right (0.22)
-        float tactile_in_l = (tap_sig + scratch_sig);
-        float tactile_in_r = (tap_sig * 0.35f + scratch_sig * 0.25f);
+        // Balanced physical chassis excitation:
+        // Left Disc is closer to P10 (0.54 direct energy)
+        // Right Disc receives chassis plate conduction (0.46 direct energy)
+        // Ratio = 1.17 (~1.4dB), creating a natural left-biased spatial image with rich stereo width
+        float tactile_in_l = (tap_sig + scratch_sig) * 0.54f;
+        float tactile_in_r = (tap_sig + scratch_sig) * 0.46f;
 
         // 3. Capacitive High-Pass Loading & Surface Pressure Coupling
         // Light touch: 120 Hz HP (thin/tinny piezo).
         // Firm press: couples body mass down to 35 Hz with warm chest thump!
         float hp_freq = 120.0f * (1.0f - p10 * 0.70f);
         float hp_alpha = 1.0f / (1.0f + 6.2831853f * hp_freq / _sample_rate);
-        float sub_boost = 1.0f + p10 * 1.6f;
+        float sub_boost = 1.0f + p10 * 0.45f;
 
         // Left channel input
-        float raw_l = ext_l * 0.85f + tactile_in_l;
+        float raw_l = ext_l * 0.70f + tactile_in_l;
         _hp_state_l = hp_alpha * (_hp_state_l + raw_l);
         float sig_l = (raw_l - _hp_state_l) * sub_boost;
 
         // Right channel input
-        float raw_r = ext_r * 0.85f + tactile_in_r;
+        float raw_r = ext_r * 0.70f + tactile_in_r;
         _hp_state_r = hp_alpha * (_hp_state_r + raw_r);
         float sig_r = (raw_r - _hp_state_r) * sub_boost;
 
@@ -193,12 +198,12 @@ public:
         float ceram_l = _res_ceramic_l.Process(sig_l);
         float ceram_r = _res_ceramic_r.Process(sig_r);
 
-        float disc_out_l = sig_l * 0.55f + chas_l * 0.75f + ceram_l * 1.15f;
-        float disc_out_r = sig_r * 0.55f + chas_r * 0.75f + ceram_r * 1.15f;
+        float disc_out_l = sig_l * 0.45f + chas_l * 0.35f + ceram_l * 0.40f;
+        float disc_out_r = sig_r * 0.45f + chas_r * 0.35f + ceram_r * 0.40f;
 
-        // 5. Solid Substrate Acoustic Wave Propagation (7-sample structural delay)
+        // 5. Solid Substrate Acoustic Wave Propagation (4-sample structural delay)
         // Cross-coupled through 4.5 kHz material damping filter
-        uint8_t read_idx = (_sub_idx + 1) & 7;
+        uint8_t read_idx = (_sub_idx + 4) & 7;
         float delayed_from_l = _sub_delay_l[read_idx];
         float delayed_from_r = _sub_delay_r[read_idx];
 
@@ -207,19 +212,19 @@ public:
         _sub_idx = (_sub_idx + 1) & 7;
 
         // 4.5 kHz acoustic material damping filter
-        _cross_lp_l += 0.44f * (delayed_from_r - _cross_lp_l);
-        _cross_lp_r += 0.44f * (delayed_from_l - _cross_lp_r);
+        _cross_lp_l += 0.40f * (delayed_from_r - _cross_lp_l);
+        _cross_lp_r += 0.40f * (delayed_from_l - _cross_lp_r);
 
-        float stereo_l = disc_out_l + _cross_lp_l * 0.38f;
-        float stereo_r = disc_out_r + _cross_lp_r * 0.38f;
+        float stereo_l = disc_out_l + _cross_lp_l * 0.16f;
+        float stereo_r = disc_out_r + _cross_lp_r * 0.16f;
 
         // 6. Mechanical High-Frequency Damping (8.5 kHz solid-medium rolloff)
         _lp_damp_l += 0.67f * (stereo_l - _lp_damp_l);
         _lp_damp_r += 0.67f * (stereo_r - _lp_damp_r);
 
         // 7. Asymmetric Non-Linear Piezoelectric Saturation
-        out_l = SaturatePiezo(_lp_damp_l * 0.90f);
-        out_r = SaturatePiezo(_lp_damp_r * 0.90f);
+        out_l = SaturatePiezo(_lp_damp_l * 0.60f);
+        out_r = SaturatePiezo(_lp_damp_r * 0.60f);
     }
 
 private:
