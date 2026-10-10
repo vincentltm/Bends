@@ -2,6 +2,7 @@
 
 #include "circuit/node_table.h"
 #include "dsp/lofi_delay_model.h"
+#include "dsp/contact_mic_model.h"
 #include "core/fast_math.h"
 #include <cmath>
 #include <algorithm>
@@ -112,6 +113,9 @@ public:
         _flt_ping_env = 0.0f;
         _lofi_l.Init();
         _lofi_r.Init();
+        _contact_mic.Init(sample_rate);
+        _rub_speed_p10 = 0.0f;
+        _prev_p10_rub = 0.0f;
         if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
             std::fill_n(_delay_buf_l, _max_delay, 0.0f);
             std::fill_n(_delay_buf_r, _max_delay, 0.0f);
@@ -199,6 +203,10 @@ public:
             if (p > 0.15f && _prev_pressures[i] <= 0.05f) {
                 if (i == NodeAmp) {
                     _amp_pluck = 0.85f * (_knob_drive_pos + 0.25f);
+                } else if (i == NodeIn) {
+                    float vel = std::clamp((p - _prev_pressures[NodeIn]) * 3.5f, 0.20f, 1.0f);
+                    bool sharp = (p > 0.60f);
+                    _contact_mic.TriggerTap(vel, sharp);
                 } else if (i == NodeFlt) {
                     _flt_ping = 0.75f;
                 } else if (i == NodeRst) {
@@ -217,6 +225,11 @@ public:
             _pressures[i] = p;
             _prev_pressures[i] = p;
         }
+
+        // Calculate rubbing / scratching velocity on Pad 10
+        float delta_p10 = std::abs(_pressures[NodeIn] - _prev_p10_rub);
+        _rub_speed_p10 = std::min(2.5f, delta_p10 * 25.0f);
+        _prev_p10_rub = _pressures[NodeIn];
     }
 
     void SetActiveBridges(const ActiveBridge* bridges, uint8_t count) {
@@ -390,10 +403,16 @@ public:
         float total_ground_hum = 0.0f;
         TickGroundHum(v_rail_eff, starve, pad_standalone_p[NodeGnd], total_ground_hum);
 
-        // 4. AC Bridge audio transmission
+        // 4. Stereo Chassis Contact Mic Processing (Pad 10 IN)
+        // Shapes external audio and synthesizes physical pad scratches and taps
+        float mic_l = 0.0f;
+        float mic_r = 0.0f;
+        _contact_mic.Process(ext_l, ext_r, _pressures_smooth[NodeIn], _rub_speed_p10, mic_l, mic_r);
+
+        // AC Bridge audio transmission
         // Each node carries a stereo signal pair [Left, Right]
-        float ext_in_l = ext_l * _shunt_gnd_smooth[NodeIn];
-        float ext_in_r = ext_r * _shunt_gnd_smooth[NodeIn];
+        float ext_in_l = mic_l * _shunt_gnd_smooth[NodeIn];
+        float ext_in_r = mic_r * _shunt_gnd_smooth[NodeIn];
 
         float s_node[12][2]{{0.0f}};
         s_node[NodeClk][0] = s_clk;
@@ -481,6 +500,7 @@ public:
                 _inj_osc = 0.0f;
                 _lofi_l.Reset();
                 _lofi_r.Reset();
+                _contact_mic.Reset();
                 _dc_block_amp_l.Reset();
                 _dc_block_amp_r.Reset();
                 _dc_block_flt_l.Reset();
@@ -492,10 +512,10 @@ public:
             _rst_gnd_hold = 0;
         }
 
-        // 5. Preamp Stage: receives external audio + NodeIn injections (e.g. OUT->IN feedback) + AMP injections
+        // 5. Preamp Stage: receives external contact mic audio + NodeIn injections (e.g. OUT->IN feedback) + AMP injections
         float amp_out_l = 0.0f;
         float amp_out_r = 0.0f;
-        ProcessPreamp(ext_l, ext_r, s_inj[NodeAmp], s_inj[NodeIn], s_osc, s_clk, total_ground_hum, v_rail_eff, starve, pad_standalone_p[NodeAmp], amp_out_l, amp_out_r);
+        ProcessPreamp(ext_in_l, ext_in_r, s_inj[NodeAmp], s_inj[NodeIn], s_osc, s_clk, total_ground_hum, v_rail_eff, starve, pad_standalone_p[NodeAmp], amp_out_l, amp_out_r);
         _prev_amp_out_l = amp_out_l;
         _prev_amp_out_r = amp_out_r;
 
@@ -1408,6 +1428,11 @@ private:
     DcBlocker _dc_block_flt_r;
     DcBlocker _dc_block_dly_l;
     DcBlocker _dc_block_dly_r;
+
+    // Stereo Chassis Contact Mic (Pad 10 IN)
+    synthux::ContactMicModel _contact_mic;
+    float _rub_speed_p10{0.0f};
+    float _prev_p10_rub{0.0f};
 };
 
 } // namespace bends
