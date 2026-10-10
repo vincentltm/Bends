@@ -88,6 +88,7 @@ public:
         _prev_dly_read_l = 0.0f;
         _prev_dly_read_r = 0.0f;
         _inj_clk = 0.0f;
+        _inj_osc = 0.0f;
         _clk_beat = false;
         _motorboat_phase = 0.0f;
         _rev_phase_l = 0.0f;
@@ -421,6 +422,7 @@ public:
         }
 
         _inj_clk = (s_inj[NodeClk][0] + s_inj[NodeClk][1]) * 0.5f;
+        _inj_osc = (s_inj[NodeOsc][0] + s_inj[NodeOsc][1]) * 0.5f;
 
         // OSC <-> VCC bridge sways power rail
         float inj_vcc = (s_inj[NodeVcc][0] + s_inj[NodeVcc][1]) * 0.5f;
@@ -450,6 +452,8 @@ public:
             _sh_step_ratio = 1.0f;
             _was_frozen = false;
             _freeze_phase = 0.0f;
+            _inj_clk = 0.0f;
+            _inj_osc = 0.0f;
             _lofi_l.Reset();
             _lofi_r.Reset();
             _dc_block_amp_l.Reset();
@@ -522,6 +526,11 @@ private:
         float osc_freq = 0.15f * FastPow2(_knob_osc_pos * 14.0f) * clk_vcc_sag;
         float osc_air = PadAirHover(NodeOsc);
         osc_freq *= (1.0f + osc_air * 0.08f);
+
+        // CLK <-> OSC bridge injection: clock pulses frequency-modulate the probe oscillator
+        if (_inj_osc != 0.0f) {
+            osc_freq *= FastPow2(_inj_osc * 0.75f);
+        }
 
         _osc_phase += osc_freq * dt;
         if (_osc_phase >= 1.0f) {
@@ -641,8 +650,11 @@ private:
         float comp = 1.35f / std::pow(1.0f + drive, 0.44f);
         float out_gain = comp * (1.0f - 0.25f * starve) * _shunt_gnd_smooth[NodeAmp];
 
+        // OSC <-> CLK bridge (P03 <-> P00): injects oscillator/clock heterodyne tone into preamp
+        float osc_clk_bleed = _inj_clk * 0.40f;
+
         auto process_channel = [&](float ext_in, float inj_amp, float inj_in, DcBlocker& dc_block) -> float {
-            float amp_in = ext_in * in_vol + inj_in * 0.85f + inj_amp * 0.90f + total_ground_hum * in_vol + pluck_sig + mb_sig;
+            float amp_in = ext_in * in_vol + inj_in * 0.85f + inj_amp * 0.90f + osc_clk_bleed + total_ground_hum * in_vol + pluck_sig + mb_sig;
             float biased_in = amp_in + bias_drift;
             float gated_in = biased_in;
             if (std::abs(biased_in) < deadzone) {
@@ -966,8 +978,12 @@ private:
         // Fast clock bridge (P00 <-> P06 when >= 35 Hz) also drives sample decimation
         float fast_clk_decim = (!clk_is_slow && g_clk_dly > 0.015f) ? (g_clk_dly * 0.75f) : 0.0f;
 
+        // OSC <-> CLK (P03 <-> P00) bridge: audio-rate FM on the delay converter clock!
+        // Creates vintage PT2399 clock heterodyne sidebands and ring-mod bells on delay audio
+        float osc_clk_fm = _inj_clk * 0.35f;
+
         // Standalone touch on Pad 0 drags clock down dynamically under finger pressure
-        float eff_clk_speed = clk_fader_speed * (1.0f - standalone_p_clk * 0.75f) - fast_clk_decim;
+        float eff_clk_speed = clk_fader_speed * (1.0f - standalone_p_clk * 0.75f) - fast_clk_decim + osc_clk_fm;
         eff_clk_speed = std::clamp(eff_clk_speed, 0.04f, 1.0f);
 
         // 4. P02 (VCC) <-> P06 (DLY): Digital DAC ladder starve & bit crushing
@@ -977,7 +993,7 @@ private:
         // Comb/phasing zone (< 10ms): clean floating point unless bent or clock downsampled
         // Echo zone (> 30ms): digital converter model
         float lofi_blend = daisysp::fclamp((base_time - 0.010f) / 0.020f, 0.0f, 1.0f);
-        if (eff_clk_speed < 0.96f || g_vcc_dly > 0.02f || starve > 0.10f) {
+        if (eff_clk_speed < 0.96f || g_vcc_dly > 0.02f || starve > 0.10f || std::abs(osc_clk_fm) > 0.01f) {
             lofi_blend = 1.0f;
         }
 
@@ -1166,6 +1182,7 @@ private:
     bool    _osc_charging{true};
     uint16_t _lfsr{0xACE1u};
     float   _rnd_held{0.0f};
+    float   _inj_osc{0.0f};
 
     // Preamp Drive & Pluck
     float _knob_drive_pos{0.35f};
