@@ -96,6 +96,11 @@ public:
         _stutter_pos_l = 0.0f;
         _stutter_pos_r = 0.0f;
         _sh_step_ratio = 1.0f;
+        _rst_gnd_hold = 0;
+        _slip_timer = 0;
+        _slip_len = 2400;
+        _slip_offset_l = 0.0f;
+        _slip_offset_r = 0.0f;
         _was_frozen = false;
         _freeze_len = 48000.0f;
         _freeze_phase = 0.0f;
@@ -251,7 +256,9 @@ public:
         g_stiff[NodeRst] = 0.3f;
 
         float g_vcc_gnd = _bridge_g[NodeVcc][NodeGnd];
-        float vcc_target = vcc_rail * (1.0f - _pressures[NodeVcc] * 0.40f);
+        // Standalone touch on VCC alone has minimal effect (just subtle body load ~3%)
+        // The real voltage drop happens when slightly grounding: bridging VCC (P02) to GND (P05)
+        float vcc_target = vcc_rail * (1.0f - _pressures[NodeVcc] * 0.03f);
         if (g_vcc_gnd > 0.01f) {
             vcc_target *= (1.0f - g_vcc_gnd * 0.98f);
         }
@@ -379,7 +386,7 @@ public:
 
         // 3. Ground Hum & Electrostatic generator
         float total_ground_hum = 0.0f;
-        TickGroundHum(v_rail_eff, starve, total_ground_hum);
+        TickGroundHum(v_rail_eff, starve, pad_standalone_p[NodeGnd], total_ground_hum);
 
         // 4. AC Bridge audio transmission
         // Each node carries a stereo signal pair [Left, Right]
@@ -431,41 +438,54 @@ public:
             starve = 1.0f - v_rail_eff;
         }
 
-        // Panic Reset (P01 tap or pulled low)
-        if (_rst_tap || _v_dc_smooth[NodeRst] < 0.35f) {
+        // Hardware Reset: P01 tap OR active-low short to ground (P01 <-> P05 bridge)
+        float g_rst_gnd = _bridge_g[NodeRst][NodeGnd];
+        bool rst_active = _rst_tap || (g_rst_gnd > 0.08f) || (_v_dc_smooth[NodeRst] < 0.35f);
+        if (rst_active) {
             _rst_tap = false;
-            _flt_low_l = 0.0f;
-            _flt_low_r = 0.0f;
-            _flt_s1_l = 0.0f;
-            _flt_s2_l = 0.0f;
-            _flt_s1_r = 0.0f;
-            _flt_s2_r = 0.0f;
-            _flt_ping = 0.0f;
-            _flt_ping_env = 0.0f;
-            _smooth_delay_samples = 12.0f;
-            _damp_l = 0.0f;
-            _damp_r = 0.0f;
-            _rev_phase_l = 0.0f;
-            _rev_phase_r = 0.0f;
-            _stutter_pos_l = 0.0f;
-            _stutter_pos_r = 0.0f;
-            _sh_step_ratio = 1.0f;
-            _was_frozen = false;
-            _freeze_phase = 0.0f;
-            _inj_clk = 0.0f;
-            _inj_osc = 0.0f;
-            _lofi_l.Reset();
-            _lofi_r.Reset();
-            _dc_block_amp_l.Reset();
-            _dc_block_amp_r.Reset();
-            _dc_block_flt_l.Reset();
-            _dc_block_flt_r.Reset();
-            _dc_block_dly_l.Reset();
-            _dc_block_dly_r.Reset();
-            if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
-                std::fill_n(_delay_buf_l, _max_delay, 0.0f);
-                std::fill_n(_delay_buf_r, _max_delay, 0.0f);
+            _rst_gnd_hold++;
+            // On bridge engagement edge: complete flush of memory buffers, feedback, and filters
+            if (_rst_gnd_hold == 1) {
+                if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
+                    std::fill_n(_delay_buf_l, _max_delay, 0.0f);
+                    std::fill_n(_delay_buf_r, _max_delay, 0.0f);
+                }
+                _flt_low_l = 0.0f;
+                _flt_low_r = 0.0f;
+                _flt_s1_l = 0.0f;
+                _flt_s2_l = 0.0f;
+                _flt_s1_r = 0.0f;
+                _flt_s2_r = 0.0f;
+                _flt_ping = 0.0f;
+                _flt_ping_env = 0.0f;
+                _smooth_delay_samples = 12.0f;
+                _damp_l = 0.0f;
+                _damp_r = 0.0f;
+                _prev_dly_read_l = 0.0f;
+                _prev_dly_read_r = 0.0f;
+                _rev_phase_l = 0.0f;
+                _rev_phase_r = 0.0f;
+                _stutter_pos_l = 0.0f;
+                _stutter_pos_r = 0.0f;
+                _sh_step_ratio = 1.0f;
+                _slip_timer = 0;
+                _slip_offset_l = 0.0f;
+                _slip_offset_r = 0.0f;
+                _was_frozen = false;
+                _freeze_phase = 0.0f;
+                _inj_clk = 0.0f;
+                _inj_osc = 0.0f;
+                _lofi_l.Reset();
+                _lofi_r.Reset();
+                _dc_block_amp_l.Reset();
+                _dc_block_amp_r.Reset();
+                _dc_block_flt_l.Reset();
+                _dc_block_flt_r.Reset();
+                _dc_block_dly_l.Reset();
+                _dc_block_dly_r.Reset();
             }
+        } else {
+            _rst_gnd_hold = 0;
         }
 
         // 5. Preamp Stage: receives external audio + NodeIn injections (e.g. OUT->IN feedback) + AMP injections
@@ -576,16 +596,17 @@ private:
     }
 
     // 3. Ground Hum & Electrostatic generator
-    inline void TickGroundHum(float v_rail_eff, float starve, float& total_ground_hum) {
+    inline void TickGroundHum(float v_rail_eff, float starve, float standalone_p_gnd, float& total_ground_hum) {
         float gnd_prox = _proximities[NodeGnd];
-        float gnd_touch = _pressures_smooth[NodeGnd];
-
-        float gnd_shunt_factor = std::max(0.0f, 1.0f - gnd_touch * 6.0f);
-        float v_starve_hum = std::clamp((0.72f - v_rail_eff) / 0.55f, 0.0f, 1.0f);
-
         float eff_prox = std::max(0.0f, (gnd_prox - 0.10f) / 0.90f);
-        float hover_hum_target = (eff_prox * eff_prox) * gnd_shunt_factor * v_starve_hum;
-        _smooth_gnd_hum += (hover_hum_target - _smooth_gnd_hum) * 0.005f;
+
+        // Standalone touch on GND (P05) injects organic body ground hum (50Hz mains hum) and electrostatic buzz
+        float gnd_touch_hum = standalone_p_gnd * 0.045f;
+        float hover_hum = (eff_prox * eff_prox) * 0.015f;
+        float v_starve_hum = std::clamp((0.72f - v_rail_eff) / 0.55f, 0.0f, 1.0f) * 0.020f;
+
+        float hum_target = gnd_touch_hum + hover_hum + v_starve_hum;
+        _smooth_gnd_hum += (hum_target - _smooth_gnd_hum) * 0.008f;
 
         _gnd_hum_phase += 50.0f * kTwoPi / _sample_rate;
         if (_gnd_hum_phase >= kTwoPi) _gnd_hum_phase -= kTwoPi;
@@ -595,7 +616,7 @@ private:
         float sin2 = 2.0f * sin1 * cos1;
         float sin3 = sin1 * (3.0f - 4.0f * sin1 * sin1);
 
-        float harmonic_brightness = 0.20f + 0.40f * eff_prox;
+        float harmonic_brightness = 0.20f + 0.40f * (standalone_p_gnd + eff_prox);
         float hum_composite = sin1 * 0.70f + (sin2 * 0.22f + sin3 * 0.08f) * harmonic_brightness;
         float buzz = FastTanh(hum_composite * 1.0f);
 
@@ -606,13 +627,12 @@ private:
         _gnd_crackle_filter += (crackle - _gnd_crackle_filter) * 0.20f;
 
         float starve_buzz = buzz + (buzz * buzz - 0.5f) * starve * 0.50f;
-        float gnd_hum_audio = (starve_buzz * 0.92f + _gnd_crackle_filter * 0.08f) * _smooth_gnd_hum * 0.020f;
+        float gnd_hum_audio = (starve_buzz * 0.90f + _gnd_crackle_filter * 0.10f) * _smooth_gnd_hum;
 
         float touched_signal_nodes = _pressures_smooth[NodeAmp] + _pressures_smooth[NodeFlt] + _pressures_smooth[NodeOsc] + _pressures_smooth[NodeDly] + _pressures_smooth[NodeIn];
         float body_antenna_mult = 1.0f + std::min(0.5f, touched_signal_nodes * 0.5f);
-        float amp_touch_hum = 0.012f * _pressures_smooth[NodeAmp] * sin1 * v_starve_hum;
 
-        total_ground_hum = (gnd_hum_audio * body_antenna_mult + amp_touch_hum) * _shunt_gnd_smooth[NodeAmp];
+        total_ground_hum = gnd_hum_audio * body_antenna_mult * _shunt_gnd_smooth[NodeAmp];
     }
 
     // 4. Preamp Stage
@@ -919,6 +939,30 @@ private:
             }
         }
 
+        // 3. P02 (VCC) <-> P06 (DLY) & Low-Voltage Starve: Address Bus Slips & Freeze Glitch Loops
+        float g_vcc_dly = _bridge_g[NodeVcc][NodeDly];
+        float glitch_intensity = std::max(g_vcc_dly, std::max(0.0f, (starve - 0.35f) * 1.5f));
+        if (glitch_intensity > 0.015f) {
+            _slip_timer++;
+            if (_slip_timer >= _slip_len) {
+                _slip_timer = 0;
+                // Micro-loop duration: 15ms (720 samples) to 140ms (6720 samples)
+                _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
+                _slip_len = 720 + (_lfsr % 6000);
+
+                // Memory address bus jump / slip across delay buffer history
+                _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
+                float max_slip = std::min(48000.0f, base_read_samples * 0.80f);
+                _slip_offset_l = static_cast<float>(_lfsr % static_cast<uint32_t>(max_slip + 1.0f));
+                _slip_offset_r = _slip_offset_l * 0.95f;
+            }
+
+            // Slipped readhead positions with chaotic micro-repeats
+            float micro_pos = static_cast<float>(_slip_timer);
+            read_pos_l = std::clamp(read_pos_l - micro_pos + _slip_offset_l * glitch_intensity, 1.0f, static_cast<float>(_max_delay - 2));
+            read_pos_r = std::clamp(read_pos_r - ((_slip_timer + 300) % _slip_len) + _slip_offset_r * glitch_intensity, 1.0f, static_cast<float>(_max_delay - 2));
+        }
+
         read_pos_l = std::max(1.0f, read_pos_l);
         read_pos_r = std::max(1.0f, read_pos_r);
 
@@ -989,7 +1033,7 @@ private:
         eff_clk_speed = std::clamp(eff_clk_speed, 0.04f, 1.0f);
 
         // 4. P02 (VCC) <-> P06 (DLY): Digital DAC ladder starve & bit crushing
-        float g_vcc_dly = _bridge_g[NodeVcc][NodeDly];
+        // (g_vcc_dly and glitch_intensity resolved above)
 
         // Lo-Fi processor blend:
         // Comb/phasing zone (< 10ms): clean floating point unless bent or clock downsampled
@@ -1057,10 +1101,12 @@ private:
         float flt_to_dly_l = _bridge_g[NodeFlt][NodeDly] * flt_low_l * 1.2f;
         float flt_to_dly_r = _bridge_g[NodeFlt][NodeDly] * flt_low_r * 1.2f;
 
-        // Non-destructive Freeze:
-        // When _is_frozen is true, write operations to SDRAM buffer are completely bypassed!
+        // Non-destructive Freeze & Low-Voltage Memory Glitch:
+        // When _is_frozen is true OR under deep starve / VCC<->DLY glitch OR during RST<->GND clear,
+        // write operations to SDRAM buffer are completely bypassed!
         // All bends operate live on readhead pointers and DAC, preserving the captured audio loop forever.
-        if (!_is_frozen) {
+        bool delay_write_inhibited = _is_frozen || (glitch_intensity > 0.15f) || (_rst_gnd_hold > 0);
+        if (!delay_write_inhibited) {
             float dly_in_l = flt_low_l + amp_to_dly_l + flt_to_dly_l + FastTanh(fb_tot_l);
             float dly_in_r = flt_low_r + amp_to_dly_r + flt_to_dly_r + FastTanh(fb_tot_r);
             dly_in_l = _dc_block_dly_l.Process(dly_in_l);
@@ -1230,6 +1276,11 @@ private:
     float _stutter_pos_l{0.0f};
     float _stutter_pos_r{0.0f};
     float _sh_step_ratio{1.0f};
+    uint32_t _rst_gnd_hold{0};
+    uint16_t _slip_timer{0};
+    uint16_t _slip_len{2400};
+    float    _slip_offset_l{0.0f};
+    float    _slip_offset_r{0.0f};
 
     // Mix & Master Out
     float _knob_mix_pos{0.50f};
