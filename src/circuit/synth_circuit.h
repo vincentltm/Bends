@@ -939,9 +939,11 @@ private:
             }
         }
 
-        // 3. P02 (VCC) <-> P06 (DLY) & Low-Voltage Starve: Address Bus Slips & Freeze Glitch Loops
+        // 3. P02 (VCC) <-> P06 (DLY) & Lower-Third Voltage Starve: Address Bus Slips & Freeze Glitch Loops
+        // Slips only happen via pad bridging (P02 <-> P06) OR in the lower third of voltage rail (< 0.33V)
         float g_vcc_dly = _bridge_g[NodeVcc][NodeDly];
-        float glitch_intensity = std::max(g_vcc_dly, std::max(0.0f, (starve - 0.35f) * 1.5f));
+        float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
+        float glitch_intensity = std::max(g_vcc_dly, starve_slip);
         if (glitch_intensity > 0.015f) {
             _slip_timer++;
             if (_slip_timer >= _slip_len) {
