@@ -206,10 +206,10 @@ public:
                     _amp_pluck = 0.85f * (_knob_drive_pos + 0.25f);
                 } else if (i == NodeIn) {
                     float vel = std::clamp((p - _prev_pressures[NodeIn]) * 3.5f, 0.20f, 1.0f);
-                    bool sharp = (p > 0.60f);
-                    _contact_mic.TriggerTap(vel, sharp);
-                    _p10_tap_cooldown = 15; // ~35ms cooldown to suppress scratch on initial tap attack
+                    _contact_mic.TriggerTap(vel, false);
+                    _p10_tap_cooldown = 35; // ~70ms cooldown to completely cover tap attack and release
                     _rub_speed_p10 = 0.0f;
+                    _prev_p10_rub = p;
                 } else if (i == NodeFlt) {
                     _flt_ping = 0.75f;
                 } else if (i == NodeRst) {
@@ -231,8 +231,8 @@ public:
 
         // Calculate rubbing / scratching velocity on Pad 10
         float p10 = _pressures[NodeIn];
-        if (p10 < 0.02f) {
-            // Finger lifted off: instant reset
+        if (p10 <= 0.06f) {
+            // Finger off pad or lifting off: instantly mute rub speed
             _rub_speed_p10 = 0.0f;
             _prev_p10_rub = p10;
         } else if (_p10_tap_cooldown > 0) {
@@ -244,11 +244,11 @@ public:
             _prev_p10_rub = p10;
 
             // Noise floor threshold on MPR121 ADC delta is ~0.003
-            if (dp > 0.0035f) {
-                float motion = (dp - 0.0035f) * 35.0f;
-                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.45f;
+            if (dp > 0.005f) {
+                float motion = (dp - 0.005f) * 25.0f;
+                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.40f;
             } else {
-                _rub_speed_p10 *= 0.90f; // Smooth ~30ms release between back-and-forth strokes
+                _rub_speed_p10 *= 0.85f; // Smooth ~25ms release between back-and-forth strokes
             }
         }
     }
