@@ -865,7 +865,7 @@ private:
 
         // Manage Freeze state:
         // Freezing captures the delay buffer loop without overwriting it.
-        // Bends act as live modifications on read pointers and DAC.
+        // The Delay Time knob seamlessly varispeeds / repitches and stretches the frozen loop!
         if (_is_frozen) {
             if (!_was_frozen) {
                 _was_frozen = true;
@@ -873,9 +873,16 @@ private:
                 _freeze_anchor = _delay_write;
                 _freeze_phase = 0.0f;
             }
-            _freeze_phase += 1.0f;
-            if (_freeze_phase >= _freeze_len) {
+            // Seamless varispeed repitch/stretch according to current delay time
+            float freeze_speed = _freeze_len / std::max(48.0f, _smooth_delay_samples);
+            freeze_speed = std::clamp(freeze_speed, 0.0625f, 16.0f);
+
+            _freeze_phase += freeze_speed;
+            while (_freeze_phase >= _freeze_len) {
                 _freeze_phase -= _freeze_len;
+            }
+            while (_freeze_phase < 0.0f) {
+                _freeze_phase += _freeze_len;
             }
         } else {
             _was_frozen = false;

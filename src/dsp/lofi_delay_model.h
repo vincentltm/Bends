@@ -34,13 +34,13 @@ struct LoFiDelayModel {
         active = true;
     }
 
-    inline void Prepare(float /*delay_sec*/, float clock_ratio, float voltage, float sample_rate) {
-        // Digital clock decimation driven by master clock and voltage
-        float v_norm = daisysp::fclamp(voltage, 0.02f, 1.0f);
-        clock_speed = daisysp::fclamp(clock_ratio * (0.20f + 0.80f * v_norm), 0.04f, 1.0f);
+    inline void Prepare(float /*delay_sec*/, float clock_ratio, float /*voltage*/, float sample_rate) {
+        // Digital clock decimation is driven strictly by clock_ratio (S36 Clock Fader, Pad 0 CLK, and CLK bridges)
+        // Voltage does NOT control aliasing!
+        clock_speed = daisysp::fclamp(clock_ratio, 0.04f, 1.0f);
         active = true;
 
-        if (clock_speed >= 0.96f && v_norm >= 0.90f) {
+        if (clock_speed >= 0.96f) {
             // High clock speed: pristine clean fidelity, transparent bandwidth
             max_slew = 10.0f;
             alpha = 0.95f;
