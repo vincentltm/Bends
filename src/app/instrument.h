@@ -26,9 +26,6 @@ public:
         _led_pwm_accum = 0.0f;
         _latch_flash = 0;
         _latch_pulse_phase = 0.0f;
-
-        // Startup pluck impulse so the user gets immediate auditory confirmation on boot
-        _board.GetPreamp().TriggerPluck(0.85f);
     }
 
     // Called from main() while(1) loop (~1 kHz, runs I2C without blocking audio)

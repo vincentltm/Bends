@@ -68,6 +68,8 @@ public:
         }
 
         _flush_samples_remaining = 0;
+        _boot_fade_samples = 0;
+        _boot_fade_total = static_cast<uint32_t>(sample_rate * 0.85f); // ~850ms smooth S-curve boot fade-in
     }
 
     // Process 64-sample audio block
@@ -169,8 +171,15 @@ public:
         float alpha_decay  = 1.0f / decay_tau_samples;
 
         for (size_t n = 0; n < size; ++n) {
-            float inl = in_l ? in_l[n] : 0.0f;
-            float inr = in_r ? in_r[n] : 0.0f;
+            float boot_gain = 1.0f;
+            if (_boot_fade_samples < _boot_fade_total) {
+                float p = static_cast<float>(_boot_fade_samples) / static_cast<float>(_boot_fade_total);
+                boot_gain = 0.5f * (1.0f - FastCos(p * kPi));
+                _boot_fade_samples++;
+            }
+
+            float inl = (in_l ? in_l[n] : 0.0f) * boot_gain;
+            float inr = (in_r ? in_r[n] : 0.0f) * boot_gain;
 
             // Slew capacitive bridge connections continuously per sample
             float cap_g_osc_amp = _cap_osc_amp.Tick(g_osc_amp_target, alpha_charge, alpha_decay);
@@ -338,8 +347,8 @@ public:
             sig_l = daisysp::SoftLimit(sig_l);
             sig_r = daisysp::SoftLimit(sig_r);
 
-            out_l[n] = sig_l;
-            out_r[n] = sig_r;
+            out_l[n] = sig_l * boot_gain;
+            out_r[n] = sig_r * boot_gain;
         }
     }
 
@@ -385,6 +394,8 @@ private:
 
     bool     _prev_flush_active{false};
     uint32_t _flush_samples_remaining{0};
+    uint32_t _boot_fade_samples{0};
+    uint32_t _boot_fade_total{40800};
 };
 
 } // namespace bends
