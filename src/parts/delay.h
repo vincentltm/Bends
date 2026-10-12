@@ -33,9 +33,6 @@ public:
 
         _smooth_delay_samples = 28.0f;
         _knob_dly_held = 0.50f;
-        _delay_time_curr = 28.0f;
-        _delay_time_prev = 28.0f;
-        _delay_xfade = 1.0f;
         _delay_time_initialized = false;
 
         _damp_l = 0.0f;
@@ -64,8 +61,11 @@ public:
 
     inline void PrepareBlock(float knob_dly, float knob_clk, float node_pull_dly, float node_pull_clk) {
         float u_raw = std::clamp(knob_dly + node_pull_dly * 0.20f, 0.0f, 1.0f);
-        if (!_delay_time_initialized || std::abs(u_raw - _knob_dly_held) > 0.005f) {
+        if (!_delay_time_initialized) {
             _knob_dly_held = u_raw;
+        } else {
+            // Smooth potentiometer reads continuously: zero staircase steps
+            _knob_dly_held += 0.08f * (u_raw - _knob_dly_held);
         }
         float u = _knob_dly_held;
 
@@ -99,37 +99,22 @@ public:
         float eff_clk_speed = (_clk_fader_speed * (1.0f + mods.overclock) - mods.decimate + mods.clock_fm) * clk_rail_sag;
         eff_clk_speed = std::clamp(eff_clk_speed, 0.0f, 1.45f);
 
-        // Delay Time knob smoothing & raised-cosine crossfading
+        // Continuous rate-limited tape-head tracking:
+        // Lengthening: max_up = 0.80f strictly guarantees forward play speed >= 0.20x (pitch smoothly dips, tape slows).
+        // Shortening: max_down = 2.00f runs forward play speed <= 3.00x (pitch smoothly rises, tape speeds).
+        // Comb mode (< 2400 samples): track_alpha = 0.04f for snappy melodic tracking.
+        // Echo range: track_alpha = 0.006f for silky, smooth analog tape delay sweeps with ZERO crackles or pops.
         if (!_delay_time_initialized) {
             _smooth_delay_samples = _target_samples;
-            _delay_time_curr = _target_samples;
-            _delay_time_prev = _target_samples;
-            _delay_xfade = 1.0f;
             _delay_time_initialized = true;
-        } else if (_knob_dly_held < 0.20f) {
-            _smooth_delay_samples += 0.025f * (_target_samples - _smooth_delay_samples);
-            _delay_time_curr = _smooth_delay_samples;
-            _delay_time_prev = _smooth_delay_samples;
-            _delay_xfade = 1.0f;
         } else {
-            if (_delay_xfade >= 1.0f) {
-                if (std::abs(_target_samples - _delay_time_curr) > 36.0f) {
-                    _delay_time_prev = _delay_time_curr;
-                    _delay_time_curr = _target_samples;
-                    _delay_xfade = 0.0f;
-                }
-            } else {
-                _delay_xfade += 0.00085f; // ~25ms crossfade
-                if (_delay_xfade >= 1.0f) {
-                    _delay_xfade = 1.0f;
-                    if (std::abs(_target_samples - _delay_time_curr) > 36.0f) {
-                        _delay_time_prev = _delay_time_curr;
-                        _delay_time_curr = _target_samples;
-                        _delay_xfade = 0.0f;
-                    }
-                }
+            float track_alpha = (_target_samples < 2400.0f) ? 0.04f : 0.006f;
+            float max_up   = (_target_samples < 2400.0f) ? 0.85f : 0.80f;
+            float max_down = (_target_samples < 2400.0f) ? 0.85f : 2.00f;
+            float delta = _target_samples - _smooth_delay_samples;
+            if (std::abs(delta) > 0.05f) {
+                _smooth_delay_samples += std::clamp(delta * track_alpha, -max_down, max_up);
             }
-            _smooth_delay_samples = _delay_time_curr;
         }
 
         // Freeze handling
@@ -181,24 +166,9 @@ public:
             }
         }
 
-        // Read delay buffer with raised-cosine crossfade
-        float mod_l = read_pos_l - base_read_samples;
-        float mod_r = read_pos_r - base_read_samples;
-
-        float raw_l, raw_r;
-        if (!is_frozen && _knob_dly_held >= 0.20f && _delay_xfade < 1.0f) {
-            float fade_win = 0.5f * (1.0f - FastCos(_delay_xfade * kPi));
-            float prev_l = std::clamp(_delay_time_prev + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float curr_l = std::clamp(_delay_time_curr + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            raw_l = _buffer.ReadL(prev_l) * (1.0f - fade_win) + _buffer.ReadL(curr_l) * fade_win;
-
-            float prev_r = std::clamp(_delay_time_prev + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float curr_r = std::clamp(_delay_time_curr + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            raw_r = _buffer.ReadR(prev_r) * (1.0f - fade_win) + _buffer.ReadR(curr_r) * fade_win;
-        } else {
-            raw_l = _buffer.ReadL(read_pos_l);
-            raw_r = _buffer.ReadR(read_pos_r);
-        }
+        // Read delay buffer continuously (zero crossfade discontinuities, zero crackles)
+        float raw_l = _buffer.ReadL(read_pos_l);
+        float raw_r = _buffer.ReadR(read_pos_r);
 
         // Address bus slip & CD skips
         float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
@@ -354,9 +324,6 @@ private:
 
     float _smooth_delay_samples{28.0f};
     float _knob_dly_held{0.50f};
-    float _delay_time_curr{28.0f};
-    float _delay_time_prev{28.0f};
-    float _delay_xfade{1.0f};
     bool  _delay_time_initialized{false};
     float _target_samples{28.0f};
     float _clk_fader_speed{1.0f};

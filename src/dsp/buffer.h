@@ -59,8 +59,9 @@ public:
         while (read_pos >= max_d) read_pos -= max_d;
 
         size_t idx0 = static_cast<size_t>(read_pos);
-        if (idx0 >= _max_size - 1) idx0 = _max_size - 2;
+        if (idx0 >= _max_size) idx0 = 0;
         size_t idx1 = idx0 + 1;
+        if (idx1 >= _max_size) idx1 = 0;
         float frac = read_pos - static_cast<float>(idx0);
 
         return _buf_l[idx0] + frac * (_buf_l[idx1] - _buf_l[idx0]);
@@ -76,8 +77,9 @@ public:
         while (read_pos >= max_d) read_pos -= max_d;
 
         size_t idx0 = static_cast<size_t>(read_pos);
-        if (idx0 >= _max_size - 1) idx0 = _max_size - 2;
+        if (idx0 >= _max_size) idx0 = 0;
         size_t idx1 = idx0 + 1;
+        if (idx1 >= _max_size) idx1 = 0;
         float frac = read_pos - static_cast<float>(idx0);
 
         return _buf_r[idx0] + frac * (_buf_r[idx1] - _buf_r[idx0]);
