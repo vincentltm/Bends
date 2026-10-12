@@ -22,6 +22,23 @@
 
 namespace bends {
 
+struct CapacitiveBridge {
+    float val{0.0f};
+
+    inline float Tick(float target, float alpha_charge, float alpha_decay) {
+        float diff = target - val;
+        if (diff > 0.0f) {
+            val += diff * alpha_charge;
+        } else {
+            val += diff * alpha_decay;
+            if (val < 0.0002f) val = 0.0f;
+        }
+        return val;
+    }
+
+    void Reset() { val = 0.0f; }
+};
+
 class Board {
 public:
     void Init(float sample_rate, float* delay_buf_l, float* delay_buf_r, size_t max_delay = Delay::kMaxDelay) {
@@ -30,6 +47,8 @@ public:
         _contacts.Reset();
         _solver.Reset();
         _rail.Init(sample_rate);
+        _cap_osc_amp.Reset();
+        _cap_osc_dly.Reset();
 
         _clock.Init(sample_rate);
         _osc.Init(sample_rate);
@@ -134,18 +153,38 @@ public:
 
         uint8_t num_br = _contacts.NumActiveBridges();
         const auto* br = _contacts.ActiveBridges();
-        float g_osc_amp = _contacts.Conductance(NodeOsc, NodeAmp);
-        float g_osc_dly = _contacts.Conductance(NodeOsc, NodeDly);
+        float g_osc_amp_target = _contacts.Conductance(NodeOsc, NodeAmp);
+        float g_osc_dly_target = _contacts.Conductance(NodeOsc, NodeDly);
+
+        // Capacitive Bridge Slew & Decay Time Constants:
+        // - At full rail (starve = 0): fast charge (~1.5ms) for snappy, zero-latency touch, and smooth ~20ms release
+        // - Under starve (starve -> 1): capacitor charge/discharge slows down dramatically,
+        //   blooming into a soft swell and extending decay to 350-500ms (dreamy analog decay!)
+        // - Firm touch charges faster (sharp); feather touch charges slower (soft).
+        float block_starve = 1.0f - _rail.EffectiveVcc();
+        float firmness = std::clamp(g_osc_amp_target, 0.1f, 1.0f);
+        float attack_tau_samples = (65.0f + 1200.0f * (block_starve * block_starve)) / (0.4f + 0.6f * firmness);
+        float decay_tau_samples  = 850.0f + 22000.0f * (block_starve * block_starve);
+        float alpha_charge = 1.0f / attack_tau_samples;
+        float alpha_decay  = 1.0f / decay_tau_samples;
 
         for (size_t n = 0; n < size; ++n) {
             float inl = in_l ? in_l[n] : 0.0f;
             float inr = in_r ? in_r[n] : 0.0f;
+
+            // Slew capacitive bridge connections continuously per sample
+            float cap_g_osc_amp = _cap_osc_amp.Tick(g_osc_amp_target, alpha_charge, alpha_decay);
+            float cap_g_osc_dly = _cap_osc_dly.Tick(g_osc_dly_target, alpha_charge, alpha_decay);
 
             // Compute AC cross-injections from active contact bridges
             float s_inj[kSolverNodes][2]{{0.0f}};
             for (uint8_t k = 0; k < num_br; ++k) {
                 uint8_t a = br[k].a;
                 uint8_t b = br[k].b;
+                // Exclude direct audio paths handled continuously by capacitive slewers:
+                if ((a == NodeOsc && b == NodeAmp) || (a == NodeAmp && b == NodeOsc)) continue;
+                if ((a == NodeOsc && b == NodeDly) || (a == NodeDly && b == NodeOsc)) continue;
+
                 float g = br[k].g;
                 s_inj[a][0] += g * _prev_node_sig[b][0];
                 s_inj[a][1] += g * _prev_node_sig[b][1];
@@ -195,12 +234,14 @@ public:
             mic_l *= _solver.Retention(NodeIn);
             mic_r *= _solver.Retention(NodeOut);
 
-            // Preamp: receives mic + direct oscillator bridge injection + AC cross-injections
+            // Preamp: receives mic + direct capacitive oscillator bridge injection + AC cross-injections
             float amp_l = 0.0f, amp_r = 0.0f;
-            float osc_inject = s_osc * g_osc_amp * 0.85f + s_inj[NodeAmp][0];
+            float osc_inject = s_osc * cap_g_osc_amp * 1.50f + s_inj[NodeAmp][0];
+            PreampMods pmods = mods.preamp;
+            pmods.ring_mod = cap_g_osc_amp; // Ring mod crossfade tracks capacitive envelope
             _preamp.Process(mic_l + s_inj[NodeIn][0], mic_r + s_inj[NodeIn][1],
                             press_amp_ret,
-                            mods.preamp,
+                            pmods,
                             osc_inject, s_hum, vcc, starve, _solver.Retention(NodeAmp),
                             amp_l, amp_r);
 
@@ -218,15 +259,15 @@ public:
             // Delay Feedback Loop routes & Oscillator Injection into Delay
             float fbk_route = mods.delay.fbk_filter_loop;
             float osc_to_dly = 0.0f;
-            if (g_osc_dly > 0.015f) {
+            if (cap_g_osc_dly > 0.005f) {
                 if (frame.osc_mode == Oscillator::ModeSaw) {
                     if (frame.s33_dly < 0.20f) {
-                        osc_to_dly = (osc_reset * 0.92f + s_osc * 0.22f) * g_osc_dly;
+                        osc_to_dly = (osc_reset * 0.92f + s_osc * 0.22f) * cap_g_osc_dly;
                     } else {
-                        osc_to_dly = (s_osc * 0.35f + osc_reset * 0.50f) * g_osc_dly;
+                        osc_to_dly = (s_osc * 0.35f + osc_reset * 0.50f) * cap_g_osc_dly;
                     }
                 } else {
-                    osc_to_dly = s_osc * g_osc_dly * 0.45f;
+                    osc_to_dly = s_osc * cap_g_osc_dly * 0.45f;
                 }
             }
 
@@ -321,6 +362,8 @@ private:
     Solver      _solver;
     Rail        _rail;
     BendEngine  _bend_engine;
+    CapacitiveBridge _cap_osc_amp;
+    CapacitiveBridge _cap_osc_dly;
 
     Clock       _clock;
     Oscillator  _osc;

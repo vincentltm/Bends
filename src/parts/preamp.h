@@ -21,6 +21,7 @@ public:
         _pluck = 0.0f;
         _motorboat_phase = 0.0f;
         _in_vol = 1.0f;
+        _drive = 1.0f;
     }
 
     void TriggerPluck(float strength) {
@@ -63,11 +64,12 @@ public:
         float deadzone = 0.07f * (starve * starve);
         float touch_drive = touch_amp * 3.0f;
 
-        float drive = (0.35f + 7.2f * _in_vol + touch_drive + mods.drive) * (1.0f + 1.4f * starve);
-        float bias_null = FastTanh(bias_drift * drive);
+        float target_drive = (0.35f + 7.2f * _in_vol + touch_drive + mods.drive) * (1.0f + 1.4f * starve);
+        _drive += 0.025f * (target_drive - _drive);
+        float bias_null = FastTanh(bias_drift * _drive);
 
         // Musical loudness compensation: prevents volume collapse when pushed or starved
-        float comp = 1.0f / (1.0f + 0.10f * std::max(0.0f, drive - 1.0f));
+        float comp = 1.0f / (1.0f + 0.10f * std::max(0.0f, _drive - 1.0f));
 
         // Master preamp volume curve: S30 is the primary volume control for external audio & bridged oscillators!
         // When S30 is at zero, output gain and all bridged inputs attenuate cleanly to zero.
@@ -100,7 +102,7 @@ public:
                 float mag = std::abs(biased_in);
                 gated_in = sgn * (mag * mag) / std::max(0.001f, deadzone);
             }
-            float clipped = FastTanh(gated_in * drive);
+            float clipped = FastTanh(gated_in * _drive);
             float out = (clipped - bias_null) * out_gain;
             return dc_block.Process(out);
         };
@@ -120,6 +122,7 @@ private:
     float _motorboat_phase{0.0f};
     float _in_vol{1.0f};
     float _in_gain{1.0f};
+    float _drive{1.0f};
 };
 
 } // namespace bends

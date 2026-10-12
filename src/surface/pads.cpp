@@ -264,7 +264,6 @@ bool Pads::Process() {
             if (_pressure[i] < 0.01f) _pressure[i] = 0.0f;
 
             if (state_changed && !raw_touched) {
-                _pressure[i] = 0.0f;
                 if (_on_release) _on_release(i);
             }
         }
