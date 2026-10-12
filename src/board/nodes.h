@@ -7,16 +7,16 @@
 namespace bends {
 
 enum NodeId : uint8_t {
-    NodeClk  = 0,  // P00: Master clock (timing)
-    NodeRst  = 1,  // P01: Reset pull-up
-    NodeVcc  = 2,  // P02: Power rail
-    NodeOsc  = 3,  // P03: Probe oscillator
-    NodeFlt  = 4,  // P04: Low-pass filter
-    NodeGnd  = 5,  // P05: Ground plane (0V)
-    NodeDly  = 6,  // P06: Delay read-head
-    NodeFbk  = 7,  // P07: Feedback loop
-    NodeAmp  = 8,  // P08: Preamp / Drive
-    NodeMix  = 9,  // P09: Master wet/dry
+    NodeClk  = 0,  // P00: Master clock (timing) - Upper-Left Ridge
+    NodeRst  = 1,  // P01: Reset pull-up - Top Center Axis
+    NodeFbk  = 2,  // P02: Feedback loop - Upper-Right Ridge
+    NodeOsc  = 3,  // P03: Probe oscillator - Far-Left Wing
+    NodeFlt  = 4,  // P04: Low-pass filter - Mid-Center Left
+    NodeGnd  = 5,  // P05: Ground plane (0V) - Bottom Center Axis
+    NodeDly  = 6,  // P06: Delay read-head - Mid-Center Right
+    NodeVcc  = 7,  // P07: Power rail - Far-Right Wing
+    NodeAmp  = 8,  // P08: Preamp / Drive - Bottom-Left Corner
+    NodeMix  = 9,  // P09: Master wet/dry - Bottom-Right Corner
     NodeIn   = 10, // P10: Ext In probe / Chassis contact mic Left
     NodeOut  = 11, // P11: Ext Out probe / Chassis contact mic Right
     NodeBody = 12, // Virtual hidden AC node (Hand/Body/Hum)
@@ -40,12 +40,12 @@ struct NodeTable {
         // Name,       Rest,   Z_dc,  Z_ac,  WriterGain, IsAudio
         { "CLK",       0.50f,  0.20f, 0.20f, 0.50f,      false }, // P00: Master clock
         { "RST",       1.00f,  3.00f, 3.00f, 0.00f,      false }, // P01: Weak pull-up
-        { "VCC",       1.00f,  0.05f, 0.02f, 0.00f,      false }, // P02: Rail fader reference
+        { "FBK",       0.50f,  0.50f, 0.50f, 0.70f,      true  }, // P02: Feedback tap
         { "OSC",       0.50f,  0.40f, 0.40f, 0.60f,      true  }, // P03: Probe oscillator
         { "FLT",       0.50f,  0.50f, 0.50f, 0.70f,      true  }, // P04: Filter out
         { "GND",       0.00f,  0.02f, 0.02f, 0.00f,      false }, // P05: Stiff 0V ground
         { "DLY",       0.50f,  0.50f, 0.50f, 0.70f,      true  }, // P06: Delay wet out
-        { "FBK",       0.50f,  0.50f, 0.50f, 0.70f,      true  }, // P07: Feedback tap
+        { "VCC",       1.00f,  0.05f, 0.02f, 0.00f,      false }, // P07: Rail fader reference
         { "AMP",       0.50f,  0.40f, 0.40f, 0.70f,      true  }, // P08: Preamp out
         { "MIX",       0.50f,  0.35f, 0.35f, 0.70f,      true  }, // P09: Master out
         { "IN",        0.50f,  0.20f, 0.20f, 0.70f,      true  }, // P10: Ext in / Mic L

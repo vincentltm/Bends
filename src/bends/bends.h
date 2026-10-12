@@ -30,7 +30,7 @@ constexpr Bend kBends[] = {
     { NodeRst, NodeOsc, Verb::Sync,     Slot::OscPhase,      Sig::ClkPulse,  1.00f, When::Always },
 
     // -------------------------------------------------------------
-    // P02 (VCC) Bends
+    // P07 (VCC) Bends
     // -------------------------------------------------------------
     // VCC <-> DLY: Power-of-two address bus jump & CD skip
     { NodeVcc, NodeDly, Verb::Set,      Slot::DlyAddressSlip,Sig::One,       1.00f, When::Always },
@@ -69,7 +69,7 @@ constexpr Bend kBends[] = {
     { NodeFlt, NodeMix, Verb::Set,      Slot::MixFilterIsol, Sig::One,       1.00f, When::Always },
 
     // -------------------------------------------------------------
-    // P06 / P07 (DLY / FBK) Bends
+    // P06 / P02 (DLY / FBK) Bends
     // -------------------------------------------------------------
     // DLY <-> FBK: Elevated ping-pong rotation cross-coupling
     { NodeDly, NodeFbk, Verb::Set,      Slot::DlyPingPong,   Sig::One,       0.68f, When::Always },

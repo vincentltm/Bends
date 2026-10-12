@@ -49,18 +49,18 @@ public:
         frame.is_frozen = touch.switches().IsBUp();
         frame.is_latched = touch.switches().IsBDown();
 
-        // 2. Read Knobs & Faders (Layout 2: Strict Signal Flow + Flanking Benders)
+        // 2. Read Knobs & Faders (Symmetrical Delay Pedal + Lateral Flanking Benders)
         // Knobs S30..S35: The Complete Delay Pedal Signal Chain
         frame.s30_amp = touch.knobs().s30(); // Knob 1: Preamp Drive & Master Voice Volume (Pad 08 AMP)
         frame.s32_flt = touch.knobs().s31(); // Knob 2: Filter Cutoff / Tone (Pad 04 FLT)
         frame.s36_clk = touch.knobs().s32(); // Knob 3: Delay Clock Rate / Tape Speed (Pad 00 CLK)
         frame.s33_dly = touch.knobs().s33(); // Knob 4: Delay Time (Pad 06 DLY)
-        frame.s34_fbk = touch.knobs().s34(); // Knob 5: Delay Feedback Regen (Pad 07 FBK)
+        frame.s34_fbk = touch.knobs().s34(); // Knob 5: Delay Feedback Regen (Pad 02 FBK)
         frame.s35_mix = touch.knobs().s35(); // Knob 6: Master Wet/Dry Mix (Pad 09 MIX)
 
         // Faders S36 & S37: The Flanking Benders
-        frame.s31_osc = touch.knobs().s36(); // Left Fader: Probe Oscillator Pitch (Pad 03 OSC)
-        frame.s37_vcc = touch.knobs().s37(); // Right Fader: System Power Rail / Starve (Pad 02 VCC)
+        frame.s31_osc = touch.knobs().s36(); // Left Fader: Probe Oscillator Pitch (Pad 03 OSC - Left Wing)
+        frame.s37_vcc = touch.knobs().s37(); // Right Fader: System Power Rail / Starve (Pad 07 VCC - Right Wing)
 
         // 3. Read Touch Pads & Proximities
         for (size_t i = 0; i < 12; ++i) {
