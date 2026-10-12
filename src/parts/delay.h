@@ -32,6 +32,12 @@ public:
         _dc_block_r.Reset();
 
         _smooth_delay_samples = 28.0f;
+        _head_a_samples = 28.0f;
+        _head_b_samples = 28.0f;
+        _active_head = 0;
+        _xfade_active = false;
+        _xfade_progress = 0.0f;
+        _xfade_dir = 1;
         _knob_dly_held = 0.50f;
         _delay_time_initialized = false;
 
@@ -99,22 +105,69 @@ public:
         float eff_clk_speed = (_clk_fader_speed * (1.0f + mods.overclock) - mods.decimate + mods.clock_fm) * clk_rail_sag;
         eff_clk_speed = std::clamp(eff_clk_speed, 0.0f, 1.45f);
 
-        // Continuous rate-limited tape-head tracking:
-        // Lengthening: max_up = 0.80f strictly guarantees forward play speed >= 0.20x (pitch smoothly dips, tape slows).
-        // Shortening: max_down = 2.00f runs forward play speed <= 3.00x (pitch smoothly rises, tape speeds).
-        // Comb mode (< 2400 samples): track_alpha = 0.04f for snappy melodic tracking.
-        // Echo range: track_alpha = 0.006f for silky, smooth analog tape delay sweeps with ZERO crackles or pops.
         if (!_delay_time_initialized) {
+            _head_a_samples = _target_samples;
+            _head_b_samples = _target_samples;
             _smooth_delay_samples = _target_samples;
+            _active_head = 0;
+            _xfade_active = false;
+            _xfade_progress = 0.0f;
             _delay_time_initialized = true;
+        } else if (_target_samples < 2400.0f) {
+            // Zone 1: Sub-millisecond Karplus-Strong string tuning (0.6ms to 50ms)
+            // Direct smooth pitch glide for resonant physical modeling tuning
+            _head_a_samples += 0.04f * (_target_samples - _head_a_samples);
+            _head_b_samples = _head_a_samples;
+            _smooth_delay_samples = _head_a_samples;
+            _active_head = 0;
+            _xfade_active = false;
+            _xfade_progress = 0.0f;
         } else {
-            float track_alpha = (_target_samples < 2400.0f) ? 0.04f : 0.006f;
-            float max_up   = (_target_samples < 2400.0f) ? 0.85f : 0.80f;
-            float max_down = (_target_samples < 2400.0f) ? 0.85f : 2.00f;
-            float delta = _target_samples - _smooth_delay_samples;
-            if (std::abs(delta) > 0.05f) {
-                _smooth_delay_samples += std::clamp(delta * track_alpha, -max_down, max_up);
+            // Zone 2: Digital Echo / Delay Buffer Length setting
+            // ZERO tape pitch-warping: read heads play strictly at 1.0x normal speed.
+            // Equal-power crossfader between Head A and Head B: head relocation happens ONLY when head volume is exactly 0.0!
+            constexpr float kMoveThreshold = 96.0f; // ~2ms threshold
+            constexpr float kStep = 1.0f / static_cast<float>(kXfadeSamples);
+
+            if (_xfade_active) {
+                _xfade_progress += static_cast<float>(_xfade_dir) * kStep;
+                if (_xfade_dir > 0 && _xfade_progress >= 1.0f) {
+                    _xfade_progress = 1.0f;
+                    _xfade_active = false;
+                    _active_head = 1;
+                    // Head A is now silent (gain = 0.0): check if target moved further
+                    if (std::abs(_target_samples - _head_b_samples) > kMoveThreshold) {
+                        _head_a_samples = _target_samples;
+                        _xfade_active = true;
+                        _xfade_dir = -1;
+                    }
+                } else if (_xfade_dir < 0 && _xfade_progress <= 0.0f) {
+                    _xfade_progress = 0.0f;
+                    _xfade_active = false;
+                    _active_head = 0;
+                    // Head B is now silent (gain = 0.0): check if target moved further
+                    if (std::abs(_target_samples - _head_a_samples) > kMoveThreshold) {
+                        _head_b_samples = _target_samples;
+                        _xfade_active = true;
+                        _xfade_dir = +1;
+                    }
+                }
+            } else {
+                if (_active_head == 0) {
+                    if (std::abs(_target_samples - _head_a_samples) > kMoveThreshold) {
+                        _head_b_samples = _target_samples;
+                        _xfade_active = true;
+                        _xfade_dir = +1;
+                    }
+                } else {
+                    if (std::abs(_target_samples - _head_b_samples) > kMoveThreshold) {
+                        _head_a_samples = _target_samples;
+                        _xfade_active = true;
+                        _xfade_dir = -1;
+                    }
+                }
             }
+            _smooth_delay_samples = _head_a_samples * (1.0f - _xfade_progress) + _head_b_samples * _xfade_progress;
         }
 
         // Freeze handling
@@ -140,8 +193,8 @@ public:
         }
 
         float base_read_samples = is_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
-        float read_pos_l = base_read_samples + mods.time_mod;
-        float read_pos_r = base_read_samples - mods.time_mod;
+        float mod_l = mods.time_mod;
+        float mod_r = -mods.time_mod;
 
         // Rhythmic glitch stutter (< 35 Hz)
         if (mods.stutter > 0.015f && clk_is_slow) {
@@ -152,7 +205,7 @@ public:
             if (stutter_l) {
                 _stutter_pos_l += 1.0f;
                 if (_stutter_pos_l >= stutter_len) _stutter_pos_l = 0.0f;
-                read_pos_l = std::max(1.0f, read_pos_l - _stutter_pos_l * mods.stutter);
+                mod_l -= _stutter_pos_l * mods.stutter;
             } else {
                 _stutter_pos_l = 0.0f;
             }
@@ -160,15 +213,45 @@ public:
             if (stutter_r) {
                 _stutter_pos_r += 1.0f;
                 if (_stutter_pos_r >= stutter_len) _stutter_pos_r = 0.0f;
-                read_pos_r = std::max(1.0f, read_pos_r - _stutter_pos_r * mods.stutter);
+                mod_r -= _stutter_pos_r * mods.stutter;
             } else {
                 _stutter_pos_r = 0.0f;
             }
         }
 
-        // Read delay buffer continuously (zero crossfade discontinuities, zero crackles)
-        float raw_l = _buffer.ReadL(read_pos_l);
-        float raw_r = _buffer.ReadR(read_pos_r);
+        // Read delay buffer (Equal-Power Dual-Head or Direct)
+        float raw_l, raw_r;
+        if (is_frozen) {
+            float pos_l = std::clamp(base_read_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(base_read_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            raw_l = _buffer.ReadL(pos_l);
+            raw_r = _buffer.ReadR(pos_r);
+        } else if (_xfade_active) {
+            float angle = 0.5f * kPi * _xfade_progress;
+            float gain_a = FastCos(angle);
+            float gain_b = FastSin(angle);
+
+            float pos_a_l = std::clamp(_head_a_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_a_r = std::clamp(_head_a_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_b_l = std::clamp(_head_b_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_b_r = std::clamp(_head_b_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+
+            raw_l = _buffer.ReadL(pos_a_l) * gain_a + _buffer.ReadL(pos_b_l) * gain_b;
+            raw_r = _buffer.ReadR(pos_a_r) * gain_a + _buffer.ReadR(pos_b_r) * gain_b;
+        } else if (_active_head == 0) {
+            float pos_l = std::clamp(_head_a_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(_head_a_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            raw_l = _buffer.ReadL(pos_l);
+            raw_r = _buffer.ReadR(pos_r);
+        } else {
+            float pos_l = std::clamp(_head_b_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(_head_b_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            raw_l = _buffer.ReadL(pos_l);
+            raw_r = _buffer.ReadR(pos_r);
+        }
+
+        float read_pos_l = base_read_samples + mod_l;
+        float read_pos_r = base_read_samples + mod_r;
 
         // Address bus slip & CD skips
         float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
@@ -293,11 +376,13 @@ public:
         }
 
         // Feedback calculation & Ping-Pong cross-coupling
+        // Gentle feedback stabilization during active crossfades prevents phase accumulation crackles
+        float fb_xfade_duck = _xfade_active ? (1.0f - 0.20f * (4.0f * _xfade_progress * (1.0f - _xfade_progress))) : 1.0f;
         float ping_pong_cross = 0.32f + mods.ping_pong;
         float cross = std::clamp(ping_pong_cross, 0.0f, 1.0f);
         float direct = 1.0f - cross;
-        float fb_tot_l = (_damp_l * direct + _damp_r * cross) * eff_fb * shunt_fbk;
-        float fb_tot_r = (_damp_r * direct + _damp_l * cross) * eff_fb * shunt_fbk;
+        float fb_tot_l = (_damp_l * direct + _damp_r * cross) * eff_fb * shunt_fbk * fb_xfade_duck;
+        float fb_tot_r = (_damp_r * direct + _damp_l * cross) * eff_fb * shunt_fbk * fb_xfade_duck;
 
         // SDRAM buffer write (inhibited during freeze or deep glitch)
         bool write_inhibited = is_frozen || (glitch_intensity > 0.15f) || (mods.xor_glitch > 0.60f);
@@ -323,6 +408,13 @@ private:
     DcBlocker _dc_block_r;
 
     float _smooth_delay_samples{28.0f};
+    float _head_a_samples{28.0f};
+    float _head_b_samples{28.0f};
+    uint8_t _active_head{0};
+    bool  _xfade_active{false};
+    float _xfade_progress{0.0f};
+    int8_t _xfade_dir{1};
+    static constexpr uint16_t kXfadeSamples{1680}; // ~35ms at 48kHz
     float _knob_dly_held{0.50f};
     bool  _delay_time_initialized{false};
     float _target_samples{28.0f};
