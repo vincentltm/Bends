@@ -59,6 +59,7 @@ public:
         _freeze_phase = 0.0f;
         _target_samples = 28.0f;
         _clk_fader_speed = 1.0f;
+        _clk_fm_slow = 0.0f;
     }
 
     inline void ServiceIncrementalClear(size_t chunk_size = 4096) {
@@ -102,8 +103,8 @@ public:
                         float v_rail_eff, float starve, float shunt_dly, float shunt_fbk,
                         float& out_l, float& out_r) {
         float clk_rail_sag = 0.50f + 0.50f * (v_rail_eff * v_rail_eff);
-        float eff_clk_speed = (_clk_fader_speed * (1.0f + mods.overclock) - mods.decimate + mods.clock_fm) * clk_rail_sag;
-        eff_clk_speed = std::clamp(eff_clk_speed, 0.0f, 1.45f);
+        float eff_clk_speed = (_clk_fader_speed * (1.0f + mods.overclock) - mods.decimate) * clk_rail_sag;
+        eff_clk_speed = std::clamp(eff_clk_speed, 0.05f, 1.45f);
 
         if (!_delay_time_initialized) {
             _head_a_samples = _target_samples;
@@ -196,27 +197,32 @@ public:
 
         // Dynamic Length & Quality scaled modulation from OSC <-> CLK bend
         // - Short length (< 2400 samples, Karplus-Strong string):
-        //   Proportional scaling modulates string fundamental pitch, creating singing Karplus melodies,
-        //   vibrato, arpeggiated pitch ramps, and acoustic FM bell harmonics!
+        //   Slow LFO rates glide string fundamental pitch (singing melodies, plucks, stepped S&H arpeggios).
+        //   Audio rates produce warm acoustic FM bell/chime overtones without harsh metallic clatter.
         // - Long length (>= 2400 samples, Echo & Space):
-        //   Square-root scaling modulates Left/Right heads in quadrature (+ / -), creating lush 3D stereo
-        //   chorus, analog wow/flutter, and dramatic deep flanger/Doppler sweeps!
+        //   Slow LFO rates sweep delay heads in quadrature (+ / -) for lush 3D stereo chorus and flanger sweeps.
+        //   Audio rates produce warm analog tape flutter and harmonic sheen.
         float clk_fm = mods.clock_fm;
         float clk_fm_time_mod_l = 0.0f;
         float clk_fm_time_mod_r = 0.0f;
         if (std::abs(clk_fm) > 0.001f) {
+            _clk_fm_slow += 0.0018f * (clk_fm - _clk_fm_slow);
+            float clk_fm_fast = clk_fm - _clk_fm_slow;
+
             if (base_read_samples < 2400.0f) {
                 // Karplus-Strong string tuning range: proportional pitch modulation
-                // Scales directly with base_read_samples so pitch deflection (semitones) is uniform across all notes
-                float karplus_depth = base_read_samples * 0.25f;
-                clk_fm_time_mod_l = clk_fm * karplus_depth;
-                clk_fm_time_mod_r = clk_fm * (karplus_depth * 0.85f); // Micro-detuned stereo string pair
+                // Musical pitch swing (+/- 2.5 semitones max) + acoustic FM bell overtone
+                float slow_depth = std::min(45.0f, base_read_samples * 0.15f);
+                clk_fm_time_mod_l = _clk_fm_slow * slow_depth + clk_fm_fast * 1.8f;
+                clk_fm_time_mod_r = _clk_fm_slow * (slow_depth * 0.88f) + clk_fm_fast * 1.5f;
             } else {
-                // Echo delay range: lush stereo chorus and wide dramatic time-sweeps
-                float echo_depth = 16.0f + std::sqrt(base_read_samples) * 0.85f;
-                clk_fm_time_mod_l = clk_fm * echo_depth;
-                clk_fm_time_mod_r = -clk_fm * echo_depth; // Quadrature stereo widening
+                // Echo delay range: lush quadrature stereo chorus & flanger sweeps
+                float slow_depth = 20.0f + std::sqrt(base_read_samples) * 0.35f;
+                clk_fm_time_mod_l = _clk_fm_slow * slow_depth + clk_fm_fast * 1.8f;
+                clk_fm_time_mod_r = -_clk_fm_slow * slow_depth - clk_fm_fast * 1.5f;
             }
+        } else {
+            _clk_fm_slow *= 0.998f;
         }
 
         float mod_l = mods.time_mod + clk_fm_time_mod_l;
@@ -248,8 +254,8 @@ public:
         // Read delay buffer (Equal-Power Dual-Head or Direct)
         float raw_l, raw_r;
         if (is_frozen) {
-            float pos_l = std::clamp(base_read_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_r = std::clamp(base_read_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_l = std::clamp(base_read_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(base_read_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
             raw_l = _buffer.ReadL(pos_l);
             raw_r = _buffer.ReadR(pos_r);
         } else if (_xfade_active) {
@@ -257,21 +263,21 @@ public:
             float gain_a = FastCos(angle);
             float gain_b = FastSin(angle);
 
-            float pos_a_l = std::clamp(_head_a_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_a_r = std::clamp(_head_a_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_b_l = std::clamp(_head_b_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_b_r = std::clamp(_head_b_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_a_l = std::clamp(_head_a_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_a_r = std::clamp(_head_a_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_b_l = std::clamp(_head_b_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_b_r = std::clamp(_head_b_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
 
             raw_l = _buffer.ReadL(pos_a_l) * gain_a + _buffer.ReadL(pos_b_l) * gain_b;
             raw_r = _buffer.ReadR(pos_a_r) * gain_a + _buffer.ReadR(pos_b_r) * gain_b;
         } else if (_active_head == 0) {
-            float pos_l = std::clamp(_head_a_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_r = std::clamp(_head_a_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_l = std::clamp(_head_a_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(_head_a_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
             raw_l = _buffer.ReadL(pos_l);
             raw_r = _buffer.ReadR(pos_r);
         } else {
-            float pos_l = std::clamp(_head_b_samples + mod_l, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            float pos_r = std::clamp(_head_b_samples + mod_r, 1.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_l = std::clamp(_head_b_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float pos_r = std::clamp(_head_b_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
             raw_l = _buffer.ReadL(pos_l);
             raw_r = _buffer.ReadR(pos_r);
         }
@@ -280,9 +286,10 @@ public:
         float read_pos_r = base_read_samples + mod_r;
 
         // Address bus slip & CD skips: low clock quality + clock FM induces digital buffer stutter & CD skips
-        float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
-        float clk_quality_drop = (_clk_fader_speed < 0.60f) ? ((0.60f - _clk_fader_speed) / 0.45f) : 0.0f;
-        float clk_fm_glitch = std::abs(clk_fm) * clk_quality_drop * 1.20f;
+        // Engaged strictly when Left Fader S36 is in lower range (< 0.38) or voltage rail is starved (< 0.35)
+        float starve_slip = (v_rail_eff < 0.35f) ? ((0.35f - v_rail_eff) / 0.30f) : 0.0f;
+        float clk_quality_drop = (_clk_fader_speed < 0.38f) ? ((0.38f - _clk_fader_speed) / 0.25f) : 0.0f;
+        float clk_fm_glitch = std::abs(clk_fm) * clk_quality_drop * 1.0f;
         float glitch_intensity = std::max(mods.address_slip, std::max(starve_slip, clk_fm_glitch));
 
         if (glitch_intensity > 0.015f) {
@@ -384,9 +391,10 @@ public:
         _damp_r += string_damp * (raw_r - _damp_r);
 
         // Lo-Fi downsampler & DAC quantization
-        // When Clock FM is active, engage the PT2399 downsampler so heterodyne sidebands and aliasing are heard!
+        // Clean 16-bit hi-fi path when clock fader is high and rail is good;
+        // engages authentic PT2399 downsampling and DAC crush when clock fader is pulled down
         float out_dac_l, out_dac_r;
-        if (eff_clk_speed >= 0.98f && v_rail_eff >= 0.95f && mods.decimate < 0.01f && std::abs(clk_fm) < 0.01f) {
+        if (eff_clk_speed >= 0.98f && v_rail_eff >= 0.95f && mods.decimate < 0.01f) {
             out_dac_l = _damp_l * shunt_dly;
             out_dac_r = _damp_r * shunt_dly;
         } else {
@@ -465,6 +473,7 @@ private:
     bool  _was_frozen{false};
     float _freeze_len{48000.0f};
     float _freeze_phase{0.0f};
+    float _clk_fm_slow{0.0f};
 };
 
 } // namespace bends
