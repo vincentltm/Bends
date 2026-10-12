@@ -55,8 +55,8 @@ constexpr Bend kBends[] = {
     { NodeOsc, NodeFlt, Verb::Trigger,  Slot::FltPing,       Sig::OscReset,  0.85f, When::Saw },
     // OSC <-> DLY: Quadrature chorus/FM (Sin) or ramp barberpole (Saw)
     { NodeOsc, NodeDly, Verb::Modulate, Slot::DlyTimeMod,    Sig::Osc,       8.00f, When::Sin },
-    // OSC <-> CLK: Heterodyne audio-rate FM on delay converter clock
-    { NodeOsc, NodeClk, Verb::Modulate, Slot::DlyClockFm,    Sig::Osc,       0.35f, When::Always },
+    // OSC <-> CLK: Dynamic audio-rate FM on delay converter clock & timeheads
+    { NodeOsc, NodeClk, Verb::Modulate, Slot::DlyClockFm,    Sig::Osc,       0.55f, When::Always },
     // OSC <-> FBK: Chaotic delayed self-FM cross-modulation
     { NodeOsc, NodeFbk, Verb::Modulate, Slot::FbkRecircFm,   Sig::Osc,       0.95f, When::Always },
 

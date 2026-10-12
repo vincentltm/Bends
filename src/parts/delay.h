@@ -193,8 +193,34 @@ public:
         }
 
         float base_read_samples = is_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
-        float mod_l = mods.time_mod;
-        float mod_r = -mods.time_mod;
+
+        // Dynamic Length & Quality scaled modulation from OSC <-> CLK bend
+        // - Short length (< 2400 samples, Karplus-Strong string):
+        //   Proportional scaling modulates string fundamental pitch, creating singing Karplus melodies,
+        //   vibrato, arpeggiated pitch ramps, and acoustic FM bell harmonics!
+        // - Long length (>= 2400 samples, Echo & Space):
+        //   Square-root scaling modulates Left/Right heads in quadrature (+ / -), creating lush 3D stereo
+        //   chorus, analog wow/flutter, and dramatic deep flanger/Doppler sweeps!
+        float clk_fm = mods.clock_fm;
+        float clk_fm_time_mod_l = 0.0f;
+        float clk_fm_time_mod_r = 0.0f;
+        if (std::abs(clk_fm) > 0.001f) {
+            if (base_read_samples < 2400.0f) {
+                // Karplus-Strong string tuning range: proportional pitch modulation
+                // Scales directly with base_read_samples so pitch deflection (semitones) is uniform across all notes
+                float karplus_depth = base_read_samples * 0.25f;
+                clk_fm_time_mod_l = clk_fm * karplus_depth;
+                clk_fm_time_mod_r = clk_fm * (karplus_depth * 0.85f); // Micro-detuned stereo string pair
+            } else {
+                // Echo delay range: lush stereo chorus and wide dramatic time-sweeps
+                float echo_depth = 16.0f + std::sqrt(base_read_samples) * 0.85f;
+                clk_fm_time_mod_l = clk_fm * echo_depth;
+                clk_fm_time_mod_r = -clk_fm * echo_depth; // Quadrature stereo widening
+            }
+        }
+
+        float mod_l = mods.time_mod + clk_fm_time_mod_l;
+        float mod_r = -mods.time_mod + clk_fm_time_mod_r;
 
         // Rhythmic glitch stutter (< 35 Hz)
         if (mods.stutter > 0.015f && clk_is_slow) {
@@ -253,9 +279,11 @@ public:
         float read_pos_l = base_read_samples + mod_l;
         float read_pos_r = base_read_samples + mod_r;
 
-        // Address bus slip & CD skips
+        // Address bus slip & CD skips: low clock quality + clock FM induces digital buffer stutter & CD skips
         float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
-        float glitch_intensity = std::max(mods.address_slip, starve_slip);
+        float clk_quality_drop = (_clk_fader_speed < 0.60f) ? ((0.60f - _clk_fader_speed) / 0.45f) : 0.0f;
+        float clk_fm_glitch = std::abs(clk_fm) * clk_quality_drop * 1.20f;
+        float glitch_intensity = std::max(mods.address_slip, std::max(starve_slip, clk_fm_glitch));
 
         if (glitch_intensity > 0.015f) {
             _slip_timer++;
@@ -356,8 +384,9 @@ public:
         _damp_r += string_damp * (raw_r - _damp_r);
 
         // Lo-Fi downsampler & DAC quantization
+        // When Clock FM is active, engage the PT2399 downsampler so heterodyne sidebands and aliasing are heard!
         float out_dac_l, out_dac_r;
-        if (eff_clk_speed >= 0.98f && v_rail_eff >= 0.95f && mods.decimate < 0.01f) {
+        if (eff_clk_speed >= 0.98f && v_rail_eff >= 0.95f && mods.decimate < 0.01f && std::abs(clk_fm) < 0.01f) {
             out_dac_l = _damp_l * shunt_dly;
             out_dac_r = _damp_r * shunt_dly;
         } else {
