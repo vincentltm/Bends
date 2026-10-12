@@ -123,20 +123,20 @@ public:
         if (frame.tap_flt) _filter.TriggerPing(0.75f);
 
         // 6. Block-rate invariant calculations hoisted before 64-sample audio loop
-        float air_osc = frame.proximities[NodeOsc] * (1.0f - std::min(1.0f, frame.pressures[NodeOsc] * 2.0f));
-        float air_flt = frame.proximities[NodeFlt] * (1.0f - std::min(1.0f, frame.pressures[NodeFlt] * 2.0f));
-        float touched_sum = frame.pressures[NodeAmp] + frame.pressures[NodeFlt] + frame.pressures[NodeOsc] + frame.pressures[NodeDly];
+        float air_osc = frame.proximities[NodeOsc] * (1.0f - std::min(1.0f, _contacts.Pressure(NodeOsc) * 2.0f));
+        float air_flt = frame.proximities[NodeFlt] * (1.0f - std::min(1.0f, _contacts.Pressure(NodeFlt) * 2.0f));
+        float touched_sum = _contacts.Pressure(NodeAmp) + _contacts.Pressure(NodeFlt) + _contacts.Pressure(NodeOsc) + _contacts.Pressure(NodeDly);
         float howl_amount = std::max({_contacts.Conductance(NodeVcc, NodeFlt) * 1.5f,
                                       _contacts.Conductance(NodeFlt, NodeFbk) * 1.3f,
-                                      frame.pressures[NodeFlt] * _solver.Retention(NodeFlt) * 1.2f});
-        float gnd_touch = frame.pressures[NodeGnd] * _solver.Retention(NodeGnd);
+                                      _contacts.Pressure(NodeFlt) * _solver.Retention(NodeFlt) * 1.2f});
+        float gnd_touch = _contacts.Pressure(NodeGnd) * _solver.Retention(NodeGnd);
         float string_damp_base = 0.25f + 0.72f * (frame.s32_flt + _solver.Pull(NodeFlt) * 0.2f);
         float max_fb = (frame.s33_dly < 0.20f) ? 0.992f : 1.10f;
         float eff_fb_base = (frame.s34_fbk + _solver.Pull(NodeFbk) * 0.2f);
-        float eff_fb_press = frame.pressures[NodeFbk] * 0.30f;
-        float press_amp_ret = frame.pressures[NodeAmp] * _solver.Retention(NodeAmp);
-        float press_flt_ret = frame.pressures[NodeFlt] * _solver.Retention(NodeFlt);
-        float press_mix_ret = frame.pressures[NodeMix] * _solver.Retention(NodeMix);
+        float eff_fb_press = _contacts.Pressure(NodeFbk) * 0.30f;
+        float press_amp_ret = _contacts.Pressure(NodeAmp) * _solver.Retention(NodeAmp);
+        float press_flt_ret = _contacts.Pressure(NodeFlt) * _solver.Retention(NodeFlt);
+        float press_mix_ret = _contacts.Pressure(NodeMix) * _solver.Retention(NodeMix);
         bool is_frozen_or_inhibit = frame.is_frozen || _bend_engine.WriteInhibited();
         bool is_clk_slow = (_clock.Rate() < 35.0f);
 
@@ -238,8 +238,8 @@ public:
 
             // Contact Mic
             float mic_l = 0.0f, mic_r = 0.0f;
-            _contact_mic.Process(inl, inr, frame.pressures[NodeIn], frame.rub_speed_p10,
-                                 frame.pressures[NodeOut], frame.rub_speed_p11, mic_l, mic_r);
+            _contact_mic.Process(inl, inr, _contacts.Pressure(NodeIn), frame.rub_speed_p10,
+                                 _contacts.Pressure(NodeOut), frame.rub_speed_p11, mic_l, mic_r);
             mic_l *= _solver.Retention(NodeIn);
             mic_r *= _solver.Retention(NodeOut);
 
