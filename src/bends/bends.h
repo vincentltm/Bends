@@ -51,8 +51,12 @@ constexpr Bend kBends[] = {
     // OSC <-> GND: Grounded upper-octave engages sub-octave divider
     { NodeOsc, NodeGnd, Verb::Set,      Slot::OscSubOctave,  Sig::One,       1.00f, When::Always },
     // OSC <-> FLT: Cutoff ramp sweep (in Saw) + flyback resonant ping
-    { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::OscRamp,   4.50f, When::Saw },
-    { NodeOsc, NodeFlt, Verb::Trigger,  Slot::FltPing,       Sig::OscReset,  0.85f, When::Saw },
+    { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::OscRamp,   1.35f, When::Saw },
+    { NodeOsc, NodeFlt, Verb::Trigger,  Slot::FltPing,       Sig::OscReset,  0.25f, When::Saw },
+    // OSC <-> FLT: Liquid Filter FM (in Sin)
+    { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::Osc,       1.20f, When::Sin },
+    // OSC <-> FLT: Stepped S&H Filter Sweeps (in Rnd)
+    { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::Osc,       1.20f, When::Rnd },
     // OSC <-> DLY: Quadrature chorus/FM (Sin) or ramp barberpole (Saw)
     { NodeOsc, NodeDly, Verb::Modulate, Slot::DlyTimeMod,    Sig::Osc,       8.00f, When::Sin },
     // OSC <-> CLK: Dynamic audio-rate FM on delay converter clock & timeheads

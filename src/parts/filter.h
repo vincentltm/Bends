@@ -69,16 +69,14 @@ public:
         if (_ping > 0.001f) {
             _flt_s1_l += _ping;
             _flt_s1_r += _ping;
-            in_l += _ping * 1.5f;
-            in_r += _ping * 1.5f;
-            _ping_env = 1.0f;
+            _ping_env = std::min(1.0f, _ping_env + _ping);
             _ping = 0.0f;
         } else {
-            _ping_env *= 0.9997f; // ~250 ms ring tail
+            _ping_env *= 0.9994f; // ~150 ms ring tail
         }
 
         // Resonance
-        float res_raw = 0.62f + touch_flt * 0.35f + _ping_env * 0.32f + mods.resonance;
+        float res_raw = 0.58f + touch_flt * 0.35f + _ping_env * 0.22f + mods.resonance;
         res_raw *= shunt_gnd;
         res_raw = std::clamp(res_raw, 0.0f, 0.98f);
 

@@ -257,9 +257,13 @@ public:
             // Filter
             float flt_l = 0.0f, flt_r = 0.0f;
             FilterMods flt_mods = mods.filter;
-            flt_mods.clock_step += s_inj[NodeFlt][0];
             flt_mods.howl = howl_amount;
-            _filter.Process(amp_l + s_inj[NodeFlt][0], amp_r + s_inj[NodeFlt][1],
+
+            // Musical audio cross-injection into filter (scaled to sit nicely alongside preamp)
+            float flt_inj_l = s_inj[NodeFlt][0] * 0.35f;
+            float flt_inj_r = s_inj[NodeFlt][1] * 0.35f;
+
+            _filter.Process(amp_l + flt_inj_l, amp_r + flt_inj_r,
                             press_flt_ret,
                             flt_mods,
                             vcc, starve, _solver.Retention(NodeFlt),
