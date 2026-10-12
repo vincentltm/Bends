@@ -171,10 +171,10 @@ void Pads::CaptureSoftwareBaseline(size_t samples) {
     _has_sw_baseline = true;
 }
 
-void Pads::Process() {
+bool Pads::Process() {
     uint32_t now = daisy::System::GetNow();
     if (now - _last_poll_ms < 3) {
-        return; // Cadence to ~250-300 Hz: matches MPR121 scan rate and prevents I2C bus flooding
+        return false; // Cadence to ~250-300 Hz: matches MPR121 scan rate and prevents I2C bus flooding
     }
     _last_poll_ms = now;
 
@@ -182,7 +182,7 @@ void Pads::Process() {
     uint8_t raw[28];
     if (!ReadBurst(0x00, raw, 28)) {
         // I2C bus error or chip not responding; preserve previous state safely
-        return;
+        return false;
     }
 
     uint16_t raw_state = (static_cast<uint16_t>(raw[1] & 0x0F) << 8) | raw[0];
@@ -269,5 +269,6 @@ void Pads::Process() {
             }
         }
     }
+    return true;
 }
 

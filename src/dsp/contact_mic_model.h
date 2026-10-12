@@ -3,8 +3,6 @@
 #include "daisysp.h"
 #include <cmath>
 #include <algorithm>
-#include "piezo_tables.inc"
-
 namespace synthux {
 
 /**
@@ -18,12 +16,12 @@ namespace synthux {
  * 2. Solid Substrate Acoustic Wave Propagation:
  *    - 7-sample (~0.15ms) inter-transducer structural delay across PCB/chassis.
  *    - High-frequency material damping filter (4.5 kHz) cross-coupling L <-> R.
- * 3. Tactile P10 Surface Excitation:
- *    - Tap strikes trigger real recorded piezo micro-transients (kPiezoTap, kPiezoClick).
- *    - Scratching/rubbing dynamically scrubs through kPiezoScratch proportional to rub velocity.
- *    - Pressure coupling extends sub-bass from 120 Hz down to 35 Hz.
+ * 3. Tactile Dual-Transducer Physical Excitation:
+ *    - Non-repeating procedural physical tap impulse model (velocity-dependent hardness & organic micro-texture).
+ *    - Pure continuous stochastic friction synthesis (Poisson micro-asperities + colored shear noise).
+ *    - Dynamic pressure-coupled lowpass filtering (epidermal finger pulp damping).
  * 4. External Audio Shaping:
- *    - Stereo audio inputs (ext_l, ext_r) pass through the contact mic transfer function.
+ *    - Stereo audio inputs (ext_l, ext_r) pass through the physical contact mic transfer function.
  */
 class ContactMicModel {
 public:
@@ -49,6 +47,53 @@ public:
         }
 
         void Reset() { s1 = 0.0f; s2 = 0.0f; }
+    };
+
+    struct TapVoice {
+        bool     active{false};
+        uint16_t sample_idx{0};
+        uint16_t total_samples{0};
+        float    vel{0.0f};
+        float    phase{0.0f};
+        float    phase_inc{0.0f};
+
+        void Trigger(float velocity, float sample_rate) {
+            vel = std::clamp(velocity, 0.15f, 1.0f);
+            active = true;
+            sample_idx = 0;
+            // Physical impact contact duration:
+            // High velocity = crisp, short impact (~0.6ms) -> exciting both ceramic and chassis modes
+            // Low velocity = broad, soft fleshy impact (~1.8ms) -> mostly exciting chassis low mode
+            float dur_sec = 0.0018f - 0.0012f * vel;
+            total_samples = static_cast<uint16_t>(dur_sec * sample_rate);
+            if (total_samples < 16) total_samples = 16;
+            phase_inc = 3.14159265f / static_cast<float>(total_samples);
+            phase = 0.0f;
+        }
+
+        inline float Process(float white) {
+            if (!active) return 0.0f;
+            sample_idx++;
+            if (sample_idx >= total_samples) {
+                active = false;
+                return 0.0f;
+            }
+            phase += phase_inc;
+            // Asymmetric mechanical compressive pulse
+            float s = std::sin(phase);
+            float strike = s * (1.0f - 0.35f * (static_cast<float>(sample_idx) / total_samples));
+            // Micro-asperity texture on the leading edge (organic touch)
+            strike += white * 0.15f * s;
+            return strike * vel;
+        }
+
+        void Reset() {
+            active = false;
+            sample_idx = 0;
+            total_samples = 0;
+            vel = 0.0f;
+            phase = 0.0f;
+        }
     };
 
     void Init(float sample_rate) {
@@ -82,137 +127,148 @@ public:
         std::fill(std::begin(_sub_delay_r), std::end(_sub_delay_r), 0.0f);
         _sub_idx = 0;
 
-        _trans_active = false;
-        _trans_pos = 0.0f;
-        _trans_vel = 0.0f;
-        _trans_type = 0;
+        _tap_l.Reset();
+        _tap_r.Reset();
 
-        _pos_a = 0.0f;
-        _pos_b = 217.3f;
-        _drift_a = 0.0f;
-        _drift_b = 0.0f;
-        _pink_b0 = 0.0f;
-        _pink_b1 = 0.0f;
-        _pink_b2 = 0.0f;
+        _pink_l_b0 = 0.0f; _pink_l_b1 = 0.0f; _pink_l_b2 = 0.0f;
+        _pink_r_b0 = 0.0f; _pink_r_b1 = 0.0f; _pink_r_b2 = 0.0f;
+        _lp_pulp_l = 0.0f;
+        _lp_pulp_r = 0.0f;
+
+        _smooth_rub_l = 0.0f;
+        _smooth_rub_r = 0.0f;
+
         _rng = 0x93A11234u;
-        _smooth_rub_speed = 0.0f;
     }
 
-    void TriggerTap(float velocity, bool is_sharp = false) {
-        _trans_active = true;
-        _trans_pos = 0.0f;
-        _trans_vel = std::clamp(velocity, 0.05f, 1.0f);
-        _trans_type = 0; // Pure authentic chassis tap
+    void TriggerTap(float velocity, bool is_right_pad = false) {
+        if (is_right_pad) {
+            _tap_r.Trigger(velocity, _sample_rate);
+        } else {
+            _tap_l.Trigger(velocity, _sample_rate);
+        }
     }
 
     /**
      * Process one stereo sample.
      * @param ext_l External audio left input
      * @param ext_r External audio right input
-     * @param p10 Current touch pressure on Pad 10 (0.0 .. 1.0)
-     * @param v_rub Rubbing/scratching velocity on Pad 10
+     * @param p10 Current touch pressure on Pad 10 IN (0.0 .. 1.0)
+     * @param v_rub10 Rubbing velocity on Pad 10 IN
+     * @param p11 Current touch pressure on Pad 11 OUT (0.0 .. 1.0)
+     * @param v_rub11 Rubbing velocity on Pad 11 OUT
      * @param out_l Output left (contact mic signal)
      * @param out_r Output right (contact mic signal)
      */
-    inline void Process(float ext_l, float ext_r, float p10, float v_rub, float& out_l, float& out_r) {
-        // 1. Friction & Scratch Voice (Cadence-Compensated Physical Friction)
-        _smooth_rub_speed += (v_rub - _smooth_rub_speed) * 0.012f;
-        float eff_rub = std::max(v_rub * 0.65f, _smooth_rub_speed);
+    inline void Process(float ext_l, float ext_r,
+                        float p10, float v_rub10,
+                        float p11, float v_rub11,
+                        float& out_l, float& out_r) {
+        // 1. Friction Voices (Pure Continuous Stochastic Physical Modeling)
+        _smooth_rub_l += (v_rub10 - _smooth_rub_l) * 0.020f;
+        float eff_l = std::max(v_rub10 * 0.75f, _smooth_rub_l);
 
-        float scratch_sig = 0.0f;
-        if (eff_rub > 0.005f && p10 > 0.04f) {
-            // Speed of scrub advances dual asynchronous irrational heads through seamless loop
-            float base_rate = 0.35f + eff_rub * 0.85f;
+        _smooth_rub_r += (v_rub11 - _smooth_rub_r) * 0.020f;
+        float eff_r = std::max(v_rub11 * 0.75f, _smooth_rub_r);
 
-            // Xorshift32 PRNG (3 CPU cycles)
-            _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
-            float white = static_cast<float>(static_cast<int32_t>(_rng)) * (1.0f / 2147483648.0f);
+        // Fast PRNG step for Left channel
+        _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
+        float white_l = static_cast<float>(static_cast<int32_t>(_rng)) * (1.0f / 2147483648.0f);
 
-            // Subtle continuous micro-drift on playback heads (completely eliminates static drone)
-            _drift_a += (white * 0.05f - _drift_a) * 0.001f;
-            _drift_b += (-white * 0.05f - _drift_b) * 0.001f;
+        // Left Pink Noise Filter (Kellet 3-pole: -3dB/octave continuous texture)
+        _pink_l_b0 = 0.99765f * _pink_l_b0 + white_l * 0.0555179f;
+        _pink_l_b1 = 0.96300f * _pink_l_b1 + white_l * 0.1538520f;
+        _pink_l_b2 = 0.57000f * _pink_l_b2 + white_l * 0.5329522f;
+        float pink_l = (_pink_l_b0 + _pink_l_b1 + _pink_l_b2 + white_l * 0.5362f) * 0.22f;
 
-            _pos_a += base_rate * (1.0f + _drift_a);
-            if (_pos_a >= 512.0f) _pos_a -= 512.0f;
-            if (_pos_a < 0.0f) _pos_a += 512.0f;
+        float scratch_sig_l = 0.0f;
+        if (eff_l > 0.0004f && p10 > 0.015f) {
+            // Stochastic Poisson micro-asperity collisions (ridges striking metal)
+            // Zero periodic oscillator! Probability scales with sliding speed
+            bool asperity = ((_rng & 0x0FFF) < static_cast<uint32_t>(eff_l * 3500.0f));
+            float micro_l = asperity ? (white_l * (0.35f + 0.65f * eff_l)) : 0.0f;
 
-            // Head B runs at irrational ratio sqrt(2) ~ 1.41421356 so heads never align periodically
-            _pos_b += base_rate * 1.41421356f * (1.0f + _drift_b);
-            if (_pos_b >= 512.0f) _pos_b -= 512.0f;
-            if (_pos_b < 0.0f) _pos_b += 512.0f;
+            float raw_fric_l = pink_l * 0.75f + micro_l * 0.25f;
 
-            int ia0 = static_cast<int>(_pos_a);
-            int ia1 = (ia0 + 1) & 511;
-            float fa = _pos_a - static_cast<float>(ia0);
-            float sa = (static_cast<float>(kPiezoScratch[ia0]) + fa * (static_cast<float>(kPiezoScratch[ia1]) - static_cast<float>(kPiezoScratch[ia0]))) * (1.0f / 128.0f);
+            // Epidermal pulp lowpass (cutoff scales with velocity, damped by finger pressure)
+            // 650 Hz base preserves sparkling tactile surface detail for light touches
+            float cutoff_l = (650.0f + eff_l * 3200.0f) * (1.0f - p10 * 0.35f);
+            float g_l = std::clamp(cutoff_l * (3.14159265f / _sample_rate), 0.01f, 0.45f);
+            _lp_pulp_l += g_l * (raw_fric_l - _lp_pulp_l);
 
-            int ib0 = static_cast<int>(_pos_b);
-            int ib1 = (ib0 + 1) & 511;
-            float fb = _pos_b - static_cast<float>(ib0);
-            float sb = (static_cast<float>(kPiezoScratch[ib0]) + fb * (static_cast<float>(kPiezoScratch[ib1]) - static_cast<float>(kPiezoScratch[ib0]))) * (1.0f / 128.0f);
-
-            float table_mix = 0.5f * (sa + sb);
-
-            // Continuous velvety pink friction noise (Kellet 3-pole filter)
-            _pink_b0 = 0.99765f * _pink_b0 + white * 0.0555179f;
-            _pink_b1 = 0.96300f * _pink_b1 + white * 0.1538520f;
-            _pink_b2 = 0.57000f * _pink_b2 + white * 0.5329522f;
-            float pink = (_pink_b0 + _pink_b1 + _pink_b2 + white * 0.5362f) * 0.22f;
-
-            // Composite friction excitation
-            float friction_raw = table_mix * 0.60f + pink * 0.40f;
-
-            // Expressive dynamics: velocity squared gives natural dynamic response from whisper-soft to loud rasp
-            float vel_factor = std::clamp(eff_rub * 0.85f, 0.0f, 1.0f);
-            float press_factor = 0.20f + 0.80f * (p10 * p10);
-            float friction_power = (vel_factor * vel_factor) * press_factor;
-
-            scratch_sig = friction_raw * friction_power * 0.80f;
+            // Responsive curve: gentle linear presence + square component for hard scrubs
+            float cl_eff_l = std::clamp(eff_l, 0.0f, 1.2f);
+            float gain_l = (cl_eff_l * 0.65f + cl_eff_l * cl_eff_l * 0.35f) * (0.30f + 0.70f * p10);
+            scratch_sig_l = _lp_pulp_l * gain_l * 0.65f;
         } else {
-            _pink_b0 *= 0.95f;
-            _pink_b1 *= 0.95f;
-            _pink_b2 *= 0.95f;
+            _pink_l_b0 *= 0.88f;
+            _pink_l_b1 *= 0.88f;
+            _pink_l_b2 *= 0.88f;
+            _lp_pulp_l *= 0.88f;
         }
 
-        // 2. Transient Tap Voice (Authentic Piezo Chassis Tap)
-        float tap_sig = 0.0f;
-        if (_trans_active) {
-            _trans_pos += 0.50f;
-            const int16_t table_len = kPiezoTap_len;
-            const int8_t* table_data = kPiezoTap;
+        // Fast PRNG step for Right channel
+        _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
+        float white_r = static_cast<float>(static_cast<int32_t>(_rng)) * (1.0f / 2147483648.0f);
 
-            if (_trans_pos >= static_cast<float>(table_len - 1)) {
-                _trans_active = false;
-            } else {
-                int idx0 = static_cast<int>(_trans_pos);
-                int idx1 = idx0 + 1;
-                float frac = _trans_pos - static_cast<float>(idx0);
-                float s0 = static_cast<float>(table_data[idx0]) / 128.0f;
-                float s1 = static_cast<float>(table_data[idx1]) / 128.0f;
-                tap_sig = (s0 + frac * (s1 - s0)) * _trans_vel * 0.60f;
-            }
+        // Right Pink Noise Filter (decorrelated from left)
+        _pink_r_b0 = 0.99765f * _pink_r_b0 + white_r * 0.0555179f;
+        _pink_r_b1 = 0.96300f * _pink_r_b1 + white_r * 0.1538520f;
+        _pink_r_b2 = 0.57000f * _pink_r_b2 + white_r * 0.5329522f;
+        float pink_r = (_pink_r_b0 + _pink_r_b1 + _pink_r_b2 + white_r * 0.5362f) * 0.22f;
+
+        float scratch_sig_r = 0.0f;
+        if (eff_r > 0.0004f && p11 > 0.015f) {
+            bool asperity = ((_rng & 0x0FFF) < static_cast<uint32_t>(eff_r * 3500.0f));
+            float micro_r = asperity ? (white_r * (0.35f + 0.65f * eff_r)) : 0.0f;
+
+            float raw_fric_r = pink_r * 0.75f + micro_r * 0.25f;
+
+            float cutoff_r = (650.0f + eff_r * 3200.0f) * (1.0f - p11 * 0.35f);
+            float g_r = std::clamp(cutoff_r * (3.14159265f / _sample_rate), 0.01f, 0.45f);
+            _lp_pulp_r += g_r * (raw_fric_r - _lp_pulp_r);
+
+            float cl_eff_r = std::clamp(eff_r, 0.0f, 1.2f);
+            float gain_r = (cl_eff_r * 0.65f + cl_eff_r * cl_eff_r * 0.35f) * (0.30f + 0.70f * p11);
+            scratch_sig_r = _lp_pulp_r * gain_r * 0.65f;
+        } else {
+            _pink_r_b0 *= 0.88f;
+            _pink_r_b1 *= 0.88f;
+            _pink_r_b2 *= 0.88f;
+            _lp_pulp_r *= 0.88f;
         }
 
-        // Combined tactile impact & scratch on P10
-        // Balanced natural stereo:
-        // Left Disc: 0.60, Right Disc: 0.50 (~1.6dB natural left tilt)
-        float tactile_in_l = (tap_sig + scratch_sig) * 0.60f;
-        float tactile_in_r = (tap_sig + scratch_sig) * 0.50f;
+        // 2. Transient Tap Voices (Non-repeating physical impulse model)
+        float tap_sig_l = _tap_l.Process(white_l);
+        float tap_sig_r = _tap_r.Process(white_r);
+
+        // Tactile excitation with realistic physical solid chassis cross-coupling
+        // Pad 10 excites primarily Left (~70%), coupling naturally to Right (~30%)
+        // Pad 11 excites primarily Right (~70%), coupling naturally to Left (~30%)
+        float exc_l = tap_sig_l * 0.55f + scratch_sig_l;
+        float exc_r = tap_sig_r * 0.55f + scratch_sig_r;
+
+        float tactile_l = exc_l * 0.70f + exc_r * 0.30f;
+        float tactile_r = exc_r * 0.70f + exc_l * 0.30f;
 
         // 3. Capacitive High-Pass Loading & Surface Pressure Coupling
-        float hp_freq = 120.0f * (1.0f - p10 * 0.70f);
-        float hp_alpha = 1.0f / (1.0f + 6.2831853f * hp_freq / _sample_rate);
-        float sub_boost = 1.0f + p10 * 0.80f;
+        float hp_freq_l = 120.0f * (1.0f - p10 * 0.70f);
+        float hp_alpha_l = 1.0f / (1.0f + 6.2831853f * hp_freq_l / _sample_rate);
+        float sub_boost_l = 1.0f + p10 * 0.80f;
 
-        // Left channel input
-        float raw_l = ext_l * 0.60f + tactile_in_l;
-        _hp_state_l = hp_alpha * (_hp_state_l + raw_l);
-        float sig_l = (raw_l - _hp_state_l) * sub_boost;
+        float hp_freq_r = 120.0f * (1.0f - p11 * 0.70f);
+        float hp_alpha_r = 1.0f / (1.0f + 6.2831853f * hp_freq_r / _sample_rate);
+        float sub_boost_r = 1.0f + p11 * 0.80f;
 
-        // Right channel input
-        float raw_r = ext_r * 0.60f + tactile_in_r;
-        _hp_state_r = hp_alpha * (_hp_state_r + raw_r);
-        float sig_r = (raw_r - _hp_state_r) * sub_boost;
+        // Left transducer input
+        float raw_l = ext_l * 0.60f + tactile_l;
+        _hp_state_l = hp_alpha_l * (_hp_state_l + raw_l);
+        float sig_l = (raw_l - _hp_state_l) * sub_boost_l;
+
+        // Right transducer input
+        float raw_r = ext_r * 0.60f + tactile_r;
+        _hp_state_r = hp_alpha_r * (_hp_state_r + raw_r);
+        float sig_r = (raw_r - _hp_state_r) * sub_boost_r;
 
         // 4. Acoustic Resonator Modes (Normalized Peak Gain)
         float chas_l = _res_chassis_l.Process(sig_l);
@@ -220,38 +276,24 @@ public:
         float ceram_l = _res_ceramic_l.Process(sig_l);
         float ceram_r = _res_ceramic_r.Process(sig_r);
 
-        float disc_out_l = sig_l * 0.40f + chas_l * 0.45f + ceram_l * 0.55f;
-        float disc_out_r = sig_r * 0.40f + chas_r * 0.45f + ceram_r * 0.55f;
+        float disc_out_l = sig_l * 0.35f + chas_l * 0.40f + ceram_l * 0.45f;
+        float disc_out_r = sig_r * 0.35f + chas_r * 0.40f + ceram_r * 0.45f;
 
-        // 5. Solid Substrate Acoustic Wave Propagation (7-sample structural delay)
-        uint8_t read_idx = (_sub_idx + 1) & 7;
-        float delayed_from_l = _sub_delay_l[read_idx];
-        float delayed_from_r = _sub_delay_r[read_idx];
-
-        _sub_delay_l[_sub_idx] = disc_out_l;
-        _sub_delay_r[_sub_idx] = disc_out_r;
-        _sub_idx = (_sub_idx + 1) & 7;
-
-        // 4.5 kHz acoustic material damping filter
-        _cross_lp_l += 0.44f * (delayed_from_r - _cross_lp_l);
-        _cross_lp_r += 0.44f * (delayed_from_l - _cross_lp_r);
-
-        float stereo_l = disc_out_l + _cross_lp_l * 0.25f;
-        float stereo_r = disc_out_r + _cross_lp_r * 0.25f;
+        // Natural, cohesive stereo field: solid center focus for tight drums with gentle spatial separation
+        float stereo_l = disc_out_l * 0.60f + disc_out_r * 0.40f;
+        float stereo_r = disc_out_r * 0.60f + disc_out_l * 0.40f;
 
         // 6. Mechanical High-Frequency Damping
         _lp_damp_l += 0.67f * (stereo_l - _lp_damp_l);
         _lp_damp_r += 0.67f * (stereo_r - _lp_damp_r);
 
         // 7. Asymmetric Non-Linear Piezoelectric Saturation
-        // Output trimmed to 0.48f for comfortable headroom matching preamp
-        out_l = SaturatePiezo(_lp_damp_l * 0.48f);
-        out_r = SaturatePiezo(_lp_damp_r * 0.48f);
+        out_l = SaturatePiezo(_lp_damp_l * 0.45f);
+        out_r = SaturatePiezo(_lp_damp_r * 0.45f);
     }
 
 private:
     inline float SaturatePiezo(float x) const {
-        // Real piezoelectric crystals compress asymmetrically under mechanical stress
         float x_clip = std::clamp(x, -2.5f, 2.5f);
         float sat = x_clip + 0.14f * x_clip * x_clip - 0.05f * x_clip * x_clip * x_clip;
         return std::clamp(sat, -1.0f, 1.0f);
@@ -278,22 +320,18 @@ private:
     float _sub_delay_r[8]{0.0f};
     uint8_t _sub_idx{0};
 
-    // Transient Player Voice
-    bool    _trans_active{false};
-    float   _trans_pos{0.0f};
-    float   _trans_vel{0.0f};
-    uint8_t _trans_type{0}; // 0 = tap, 1 = click
+    // Physical Transient Tap Impulse Voices (Left and Right)
+    TapVoice _tap_l;
+    TapVoice _tap_r;
 
-    // Scratch Dual-Head Friction Synthesizer
-    float    _pos_a{0.0f};
-    float    _pos_b{217.3f};
-    float    _drift_a{0.0f};
-    float    _drift_b{0.0f};
-    float    _pink_b0{0.0f};
-    float    _pink_b1{0.0f};
-    float    _pink_b2{0.0f};
+    // Stochastic Physical Friction Synthesis (Zero Repetition / Pure Procedural)
+    float _pink_l_b0{0.0f}, _pink_l_b1{0.0f}, _pink_l_b2{0.0f};
+    float _pink_r_b0{0.0f}, _pink_r_b1{0.0f}, _pink_r_b2{0.0f};
+    float _lp_pulp_l{0.0f};
+    float _lp_pulp_r{0.0f};
+    float _smooth_rub_l{0.0f};
+    float _smooth_rub_r{0.0f};
     uint32_t _rng{0x93A11234u};
-    float    _smooth_rub_speed{0.0f};
 };
 
 } // namespace synthux

@@ -37,6 +37,114 @@ struct DcBlocker {
     }
 };
 
+struct PadGestureTracker {
+    enum State : uint8_t {
+        Idle,
+        Onset,
+        Held
+    };
+
+    State   state{Idle};
+    uint8_t rest_scans{10};
+    uint8_t onset_scans{0};
+    uint8_t lockout_scans{0};
+    float   onset_peak_dp{0.0f};
+    float   onset_max_p{0.0f};
+    float   rub_speed{0.0f};
+    float   prev_p{0.0f};
+
+    void Init() {
+        state = Idle;
+        rest_scans = 10;
+        onset_scans = 0;
+        lockout_scans = 0;
+        onset_peak_dp = 0.0f;
+        onset_max_p = 0.0f;
+        rub_speed = 0.0f;
+        prev_p = 0.0f;
+    }
+
+    void Update(float p, float& out_tap_vel) {
+        out_tap_vel = 0.0f;
+        float dp = p - prev_p;
+
+        if (p < 0.04f) {
+            if (rest_scans < 255) rest_scans++;
+            state = Idle;
+            rub_speed = 0.0f;
+            onset_scans = 0;
+            lockout_scans = 0;
+            prev_p = p;
+            return;
+        }
+
+        switch (state) {
+        case Idle: {
+            if (rest_scans >= 3) {
+                state = Onset;
+                onset_scans = 1;
+                onset_peak_dp = (dp > 0.0f) ? dp : 0.0f;
+                onset_max_p = p;
+                rub_speed = 0.0f;
+            } else {
+                state = Held;
+                lockout_scans = 6;
+                rub_speed = 0.0f;
+            }
+            rest_scans = 0;
+            break;
+        }
+
+        case Onset: {
+            rest_scans = 0;
+            onset_scans++;
+            if (dp > onset_peak_dp) {
+                onset_peak_dp = dp;
+            }
+            if (p > onset_max_p) {
+                onset_max_p = p;
+            }
+
+            if (onset_max_p > 0.12f && onset_peak_dp > 0.06f) {
+                float vel = onset_peak_dp * 2.8f + (onset_max_p - 0.12f) * 1.2f;
+                out_tap_vel = std::clamp(vel, 0.15f, 1.0f);
+                state = Held;
+                lockout_scans = 25; // ~75ms lockout suppresses scratch during tap rebound
+                rub_speed = 0.0f;
+            } else if (onset_scans >= 3) {
+                // Soft touchdown: brief 2-scan (~6ms) settle so scratching begins immediately
+                state = Held;
+                lockout_scans = 2;
+                rub_speed = 0.0f;
+            }
+            break;
+        }
+
+        case Held: {
+            rest_scans = 0;
+            if (lockout_scans > 0) {
+                lockout_scans--;
+                rub_speed = 0.0f;
+            } else {
+                float abs_dp = std::abs(dp);
+                if (abs_dp > 0.0004f) {
+                    float excess = abs_dp - 0.0004f;
+                    // Responsive curve: square root component gives immediate presence to feather scratches
+                    float motion = std::clamp(excess * 20.0f + std::sqrt(excess) * 0.50f, 0.0f, 1.2f);
+                    rub_speed += (motion - rub_speed) * 0.50f;
+                } else {
+                    rub_speed *= 0.86f;
+                    if (rub_speed < 0.002f) rub_speed = 0.0f;
+                }
+            }
+            break;
+        }
+        }
+
+        prev_p = p;
+    }
+};
+
 class SynthCircuit {
 public:
     static constexpr size_t kMaxDelay = 768000; // 16.0s at 48kHz (3.07 MB in SDRAM)
@@ -84,8 +192,14 @@ public:
         _delay_buf_l = delay_buf_l;
         _delay_buf_r = delay_buf_r;
         _max_delay = (delay_buf_l != nullptr && delay_buf_r != nullptr) ? max_delay : 0;
-        _delay_write = 0;
-        _smooth_delay_samples = 12.0f;
+        _delay_write_pos = 0.0f;
+        _smooth_delay_samples = 28.0f;
+        _dly_knob_held = 0.50f;
+        _delay_time_curr = 28.0f;
+        _delay_time_prev = 28.0f;
+        _delay_xfade = 1.0f;
+        _delay_time_initialized = false;
+        _g_osc_amp_smooth = 0.0f;
         _damp_l = 0.0f;
         _damp_r = 0.0f;
         _prev_dly_read_l = 0.0f;
@@ -115,9 +229,12 @@ public:
         _lofi_r.Init();
         _contact_mic.Init(sample_rate);
         _rub_speed_p10 = 0.0f;
-        _prev_p10_rub = 0.0f;
-        _p10_tap_cooldown = 0;
-        _p10_settle_cooldown = 0;
+        _rub_speed_p11 = 0.0f;
+        _tracker_p10.Init();
+        _tracker_p11.Init();
+        for (size_t i = 0; i < 12; ++i) {
+            _rest_scans[i] = 10;
+        }
         if (_delay_buf_l && _delay_buf_r && _max_delay > 0) {
             std::fill_n(_delay_buf_l, _max_delay, 0.0f);
             std::fill_n(_delay_buf_r, _max_delay, 0.0f);
@@ -136,6 +253,7 @@ public:
         for (size_t i = 0; i < 12; ++i) {
             _shunt_gnd_target[i] = 1.0f;
             _shunt_gnd_smooth[i] = 1.0f;
+            _bridged_weight[i]   = 0.0f;
             for (size_t j = 0; j < 12; ++j) {
                 _bridge_g[i][j] = 0.0f;
             }
@@ -184,10 +302,7 @@ public:
         _knob_drive_pos = s30_drive;
         _knob_osc_pos   = s31_osc;
         _knob_flt_pos   = s32_flt;
-        // Delay time knob deadband: reject residual ADC micro-jitter
-        if (std::abs(s33_dly - _knob_dly_pos) > 0.0025f) {
-            _knob_dly_pos = s33_dly;
-        }
+        _knob_dly_pos   = s33_dly;
         _knob_fbk_pos   = s34_fbk;
         _knob_mix_pos   = s35_mix;
         _knob_clk_pos   = s36_clk;
@@ -198,73 +313,58 @@ public:
         _is_frozen = is_frozen;
     }
 
-    void SetPressures(const float pressures[12]) {
+    void SetPressures(const float pressures[12], bool new_scan = true) {
+        for (size_t i = 0; i < 12; ++i) {
+            _pressures[i] = pressures[i];
+        }
+
+        if (!new_scan) {
+            return;
+        }
+
         for (size_t i = 0; i < 12; ++i) {
             float p = pressures[i];
-            // Detect tap strikes (rising velocity from rest)
-            if (p > 0.15f && _prev_pressures[i] <= 0.05f) {
-                if (i == NodeAmp) {
-                    _amp_pluck = 0.85f * (_knob_drive_pos + 0.25f);
-                } else if (i == NodeIn) {
-                    float vel = std::clamp((p - _prev_pressures[NodeIn]) * 2.8f, 0.15f, 1.0f);
-                    _contact_mic.TriggerTap(vel, false);
-                    _p10_tap_cooldown = 24; // ~50ms cooldown: tap ring completely suppresses scratch
-                    _p10_settle_cooldown = 0;
-                    _rub_speed_p10 = 0.0f;
-                    _prev_p10_rub = p;
-                } else if (i == NodeFlt) {
-                    _flt_ping = 0.75f;
-                } else if (i == NodeRst) {
-                    bool other_pads_held = false;
-                    for (size_t k = 0; k < 12; ++k) {
-                        if (k != NodeRst && pressures[k] > 0.08f) {
-                            other_pads_held = true;
-                            break;
+            if (p <= 0.05f) {
+                if (_rest_scans[i] < 255) _rest_scans[i]++;
+            } else {
+                if (_rest_scans[i] >= 3) {
+                    if (p > 0.14f) {
+                        if (i == NodeAmp) {
+                            _amp_pluck = 0.85f * (_knob_drive_pos + 0.25f);
+                        } else if (i == NodeFlt) {
+                            _flt_ping = 0.75f;
+                        } else if (i == NodeRst) {
+                            bool other_pads_held = false;
+                            for (size_t k = 0; k < 12; ++k) {
+                                if (k != NodeRst && pressures[k] > 0.08f) {
+                                    other_pads_held = true;
+                                    break;
+                                }
+                            }
+                            if (!other_pads_held && _num_bridges == 0) {
+                                _rst_tap = true;
+                            }
                         }
                     }
-                    if (!other_pads_held && _num_bridges == 0) {
-                        _rst_tap = true;
-                    }
                 }
-            } else if (i == NodeIn && p > 0.05f && _prev_pressures[NodeIn] <= 0.05f) {
-                // Gentle landing without tap: touch settle window (~30ms)
-                _p10_settle_cooldown = 15;
-                _p10_tap_cooldown = 0;
-                _rub_speed_p10 = 0.0f;
-                _prev_p10_rub = p;
-            }
-            _pressures[i] = p;
-            _prev_pressures[i] = p;
-        }
-
-        // Calculate rubbing / scratching velocity on Pad 10
-        float p10 = _pressures[NodeIn];
-        if (p10 <= 0.05f) {
-            // Finger off pad or lifted: completely silent
-            _rub_speed_p10 = 0.0f;
-            _prev_p10_rub = p10;
-            _p10_tap_cooldown = 0;
-            _p10_settle_cooldown = 0;
-        } else if (_p10_tap_cooldown > 0) {
-            _p10_tap_cooldown--;
-            _rub_speed_p10 = 0.0f;
-            _prev_p10_rub = p10;
-        } else if (_p10_settle_cooldown > 0) {
-            _p10_settle_cooldown--;
-            _rub_speed_p10 = 0.0f;
-            _prev_p10_rub = p10;
-        } else {
-            float dp = std::abs(p10 - _prev_p10_rub);
-            _prev_p10_rub = p10;
-
-            // Only register actual motion across the pad surface
-            if (dp > 0.003f) {
-                float motion = std::min(1.5f, (dp - 0.003f) * 25.0f);
-                _rub_speed_p10 += (motion - _rub_speed_p10) * 0.25f;
-            } else {
-                _rub_speed_p10 *= 0.985f; // Smooth physical momentum glide across MPR121 polling cadence
+                _rest_scans[i] = 0;
             }
         }
+
+        // Stereo Contact Mic Gestures
+        float tap_vel_10 = 0.0f;
+        _tracker_p10.Update(pressures[NodeIn], tap_vel_10);
+        if (tap_vel_10 > 0.0f) {
+            _contact_mic.TriggerTap(tap_vel_10, false);
+        }
+        _rub_speed_p10 = _tracker_p10.rub_speed;
+
+        float tap_vel_11 = 0.0f;
+        _tracker_p11.Update(pressures[NodeOut], tap_vel_11);
+        if (tap_vel_11 > 0.0f) {
+            _contact_mic.TriggerTap(tap_vel_11, true);
+        }
+        _rub_speed_p11 = _tracker_p11.rub_speed;
     }
 
     void SetActiveBridges(const ActiveBridge* bridges, uint8_t count) {
@@ -288,9 +388,16 @@ public:
             }
         }
 
-        // Precompute ground shunts for all 12 physical nodes
+        // Precompute ground shunts and standalone isolation weights for all 12 physical nodes
         for (size_t i = 0; i < 12; ++i) {
             _shunt_gnd_target[i] = 1.0f - _bridge_g[i][NodeGnd] * 0.98f;
+            float g_sum = 0.0f;
+            for (size_t j = 0; j < 12; ++j) {
+                if (i != j) {
+                    g_sum += _bridge_g[i][j];
+                }
+            }
+            _bridged_weight[i] = std::clamp(g_sum * 1.5f, 0.0f, 1.0f);
         }
     }
 
@@ -369,8 +476,17 @@ public:
                 uint8_t b = _bridges[k].b;
                 float   g = _bridges[k].g;
 
-                // Functional parameter bends (DLY, MIX, etc.) operate via dedicated DSP algorithms
+                // Functional parameter bends (DLY, RST, MIX, OSC, CLK, FBK) operate via dedicated DSP algorithms
                 // and must NOT drag each other's DC resting knob positions!
+                if (a == NodeDly || b == NodeDly ||
+                    a == NodeRst || b == NodeRst ||
+                    a == NodeMix || b == NodeMix ||
+                    a == NodeOsc || b == NodeOsc ||
+                    a == NodeClk || b == NodeClk ||
+                    a == NodeFbk || b == NodeFbk) {
+                    continue;
+                }
+
                 // DC relaxation only applies to physical voltage rails (VCC, GND) and starve loads.
                 bool a_is_dc_rail = (a == NodeVcc || a == NodeGnd || b == NodeVcc || b == NodeGnd);
                 bool a_is_dc_load = ((a == NodeFlt && b == NodeAmp) || (a == NodeAmp && b == NodeFlt));
@@ -399,20 +515,15 @@ public:
             _pressures_smooth[i] += 0.008f * (_pressures[i] - _pressures_smooth[i]);
             _shunt_gnd_smooth[i] += 0.008f * (_shunt_gnd_target[i] - _shunt_gnd_smooth[i]);
         }
+        float g_osc_amp = _bridge_g[NodeOsc][NodeAmp];
+        _g_osc_amp_smooth += 0.006f * (g_osc_amp - _g_osc_amp_smooth);
 
         // Universal Pad Bridging Isolation Rule:
         // Standalone touch effects only fire when a pad is unconnected.
         // When bridged to any other pad, the standalone touch action is smoothly bypassed.
         float pad_standalone_p[12];
         for (size_t i = 0; i < 12; ++i) {
-            float g_sum = 0.0f;
-            for (size_t j = 0; j < 12; ++j) {
-                if (i != j) {
-                    g_sum += _bridge_g[i][j];
-                }
-            }
-            float bridged_weight = std::clamp(g_sum * 1.5f, 0.0f, 1.0f);
-            pad_standalone_p[i] = _pressures_smooth[i] * (1.0f - bridged_weight);
+            pad_standalone_p[i] = _pressures_smooth[i] * (1.0f - _bridged_weight[i]);
         }
 
         // Master rail voltage: check resolved Vcc and direct VCC-GND short
@@ -438,16 +549,19 @@ public:
         float total_ground_hum = 0.0f;
         TickGroundHum(v_rail_eff, starve, pad_standalone_p[NodeGnd], total_ground_hum);
 
-        // 4. Stereo Chassis Contact Mic Processing (Pad 10 IN)
+        // 4. Stereo Chassis Contact Mic Processing (Pad 10 IN / Pad 11 OUT)
         // Shapes external audio and synthesizes physical pad scratches and taps
         float mic_l = 0.0f;
         float mic_r = 0.0f;
-        _contact_mic.Process(ext_l, ext_r, _pressures_smooth[NodeIn], _rub_speed_p10, mic_l, mic_r);
+        _contact_mic.Process(ext_l, ext_r,
+                             _pressures_smooth[NodeIn], _rub_speed_p10,
+                             _pressures_smooth[NodeOut], _rub_speed_p11,
+                             mic_l, mic_r);
 
         // AC Bridge audio transmission
         // Each node carries a stereo signal pair [Left, Right]
         float ext_in_l = mic_l * _shunt_gnd_smooth[NodeIn];
-        float ext_in_r = mic_r * _shunt_gnd_smooth[NodeIn];
+        float ext_in_r = mic_r * _shunt_gnd_smooth[NodeOut];
 
         float s_node[12][2]{{0.0f}};
         s_node[NodeClk][0] = s_clk;
@@ -477,6 +591,11 @@ public:
             uint8_t b = _bridges[k].b;
             float   g = _bridges[k].g;
 
+            // OSC <-> AMP (P03 <-> P08) is handled as a dedicated smooth volume injection in ProcessPreamp
+            if ((a == NodeOsc && b == NodeAmp) || (a == NodeAmp && b == NodeOsc)) {
+                continue;
+            }
+
             s_inj[a][0] += g * s_node[b][0];
             s_inj[a][1] += g * s_node[b][1];
 
@@ -494,9 +613,9 @@ public:
             starve = 1.0f - v_rail_eff;
         }
 
-        // Hardware Reset: P01 tap OR active-low short to ground (P01 <-> P05 bridge)
+        // Hardware Reset: P01 tap OR intentional active-low short to ground (P01 <-> P05 bridge)
         float g_rst_gnd = _bridge_g[NodeRst][NodeGnd];
-        bool rst_active = _rst_tap || (g_rst_gnd > 0.08f) || (_v_dc_smooth[NodeRst] < 0.35f);
+        bool rst_active = _rst_tap || (g_rst_gnd > 0.15f);
         if (rst_active) {
             _rst_tap = false;
             _rst_gnd_hold++;
@@ -514,7 +633,13 @@ public:
                 _flt_s2_r = 0.0f;
                 _flt_ping = 0.0f;
                 _flt_ping_env = 0.0f;
-                _smooth_delay_samples = 12.0f;
+                _smooth_delay_samples = 28.0f;
+                _dly_knob_held = 0.50f;
+                _delay_time_curr = 28.0f;
+                _delay_time_prev = 28.0f;
+                _delay_xfade = 1.0f;
+                _delay_time_initialized = false;
+                _g_osc_amp_smooth = 0.0f;
                 _damp_l = 0.0f;
                 _damp_r = 0.0f;
                 _prev_dly_read_l = 0.0f;
@@ -602,7 +727,14 @@ private:
 
     // 2. Probe Oscillator
     inline void TickOscillator(float v_rail_eff, float clk_vcc_sag, float dt, float& s_osc) {
-        float osc_freq = 0.15f * FastPow2(_knob_osc_pos * 14.0f) * clk_vcc_sag;
+        // High musical LFO / audio-rate modulator:
+        // - 0.25 Hz at minimum (4.0s slow rhythmic sweep)
+        // - ~8 Hz at 9 o'clock (vibrato/flutter LFO)
+        // - ~110 Hz at 12 o'clock center (warm musical bass pitch)
+        // - ~1.5 kHz at maximum (musical audio-rate FM / bell carrier without ultrasonic harshness)
+        float u = _knob_osc_pos;
+        float octaves = u * (22.57f - 10.02f * u);
+        float osc_freq = std::clamp(0.25f * FastPow2(octaves) * clk_vcc_sag, 0.1f, 1600.0f);
         float osc_air = PadAirHover(NodeOsc);
         osc_freq *= (1.0f + osc_air * 0.08f);
 
@@ -630,7 +762,7 @@ private:
         } else if (_osc_mode == OSC_SAW) {
             float v_th_hi = 0.65f * v_rail_eff;
             float v_th_lo = 0.30f * v_rail_eff;
-            float tau = 1.0f / (kTwoPi * std::max(0.1f, osc_freq));
+            float tau = 1.4236f / std::max(0.1f, osc_freq);
             float k_charge = dt / tau;
             // Rapid relaxation discharge: sharp flyback edge creates authentic acoustic transients
             float k_discharge = dt / (0.012f * tau);
@@ -736,15 +868,14 @@ private:
         float bias_null = FastTanh(bias_drift * drive);
 
         // Loudness compensation: scales output down as drive increases so it doesn't get painfully loud
-        float comp = 1.35f / std::pow(1.0f + drive, 0.44f);
+        float comp = 1.35f / (1.0f + 0.44f * drive + 0.08f * drive * drive);
         float out_gain = comp * (1.0f - 0.25f * starve) * _shunt_gnd_smooth[NodeAmp];
 
-        // OSC <-> CLK bridge (P03 <-> P00): injects oscillator and clock heterodyne carrier into preamp
-        float g_osc_clk = _bridge_g[NodeOsc][NodeClk];
-        float osc_clk_bleed = g_osc_clk * (s_osc * 0.45f + s_clk * 0.22f);
+        // OSC <-> AMP bridge (P03 <-> P08): smooth, touch-sensitive oscillator volume swell into preamp (zero zipper noise)
+        float osc_amp_inject = s_osc * _g_osc_amp_smooth * 0.85f;
 
         auto process_channel = [&](float ext_in, float inj_amp, float inj_in, DcBlocker& dc_block) -> float {
-            float amp_in = ext_in * in_vol + inj_in * 0.85f + inj_amp * 0.90f + osc_clk_bleed + total_ground_hum * in_vol + pluck_sig + mb_sig;
+            float amp_in = ext_in * in_vol * 0.40f + inj_in * 0.85f + inj_amp * 0.90f + osc_amp_inject + total_ground_hum * in_vol + pluck_sig + mb_sig;
             float biased_in = amp_in + bias_drift;
             float gated_in = biased_in;
             if (std::abs(biased_in) < deadzone) {
@@ -758,7 +889,7 @@ private:
         };
 
         amp_out_l = process_channel(ext_l * _shunt_gnd_smooth[NodeIn], s_inj_amp[0], s_inj_in[0], _dc_block_amp_l);
-        amp_out_r = process_channel(ext_r * _shunt_gnd_smooth[NodeIn], s_inj_amp[1], s_inj_in[1], _dc_block_amp_r);
+        amp_out_r = process_channel(ext_r * _shunt_gnd_smooth[NodeOut], s_inj_amp[1], s_inj_in[1], _dc_block_amp_r);
     }
 
     // 5. Filter Stage
@@ -923,61 +1054,135 @@ private:
 
     // 6. Delay Stage & Digital Memory Bends
     inline void ProcessDelay(float flt_low_l, float flt_low_r, float amp_out_l, float amp_out_r, float s_osc, float standalone_p_clk, float standalone_p_fbk, float v_rail_eff, float starve, float& dly_dac_l, float& dly_dac_r) {
-        float u = std::clamp(_v_dc_smooth[NodeDly], 0.0f, 1.0f);
+        float u_raw = std::clamp(_v_dc_smooth[NodeDly], 0.0f, 1.0f);
+        if (!_delay_time_initialized || std::abs(u_raw - _dly_knob_held) > 0.005f) {
+            _dly_knob_held = u_raw;
+        }
+        float u = _dly_knob_held;
+
         float base_time;
         if (u < 0.20f) {
-            // Zone 1 (0% to 20%): Sub-millisecond passthrough, jet-flange, and comb-filter phasing
-            // 0.25ms at 0% (12 samples) -> 25ms at 20% (1200 samples)
+            // Zone 1 (0% to 20%): Sub-millisecond Karplus-Strong string tuning & comb resonance
+            // 0.60ms at 0% (29 samples / 1667 Hz) -> 25ms at 20% (1200 samples / 40 Hz)
             float k = u / 0.20f;
-            base_time = 0.00025f * std::pow(100.0f, k);
+            base_time = 0.0006f * FastPow2(k * 5.3808218f);
         } else {
-            // Zone 2 (20% to 100%): Echo and Ambient Looper
-            // 25ms at 20% -> 600ms at noon (50%) -> 8.0s at 100%
-            // Matched slope (C1 continuous) at u = 0.20
+            // Zone 2 (20% to 100%): Echo, Ambient Space Delay, and Looper
+            // 25ms at 20% -> 106ms at 40% -> 312ms at 55% -> 920ms at 70% -> 2.7s at 85% -> 8.0s at 100%
             float w = (u - 0.20f) / 0.80f;
-            base_time = 0.025f + 0.4605f * w + 0.0683f * (w * w) + 7.4462f * (w * w * w);
+            base_time = 0.025f * FastPow2(w * 8.321928f);
         }
-        base_time = std::clamp(base_time, 0.00025f, 8.0f);
+        base_time = std::clamp(base_time, 0.0006f, 8.0f);
 
-        // Smooth macroscopic delay time tracking (anti-zipper, zero Doppler flutter when stationary)
-        float target_samples = std::max(1.0f, base_time * _sample_rate);
-        float slew_rate = (base_time < 0.030f) ? 0.04f : 0.008f;
-        float diff = target_samples - _smooth_delay_samples;
-        if (std::abs(diff) < 0.20f) {
+        // PT2399 Digital Variclock Model:
+        // S36 Clock Fader directly controls delay tape speed and converter clock:
+        // Top of fader (1.0) = 48 kHz (pristine clean, 1.0x normal pitch)
+        // Sliding down smoothly lowers speed down to 0.20x (~2.3 octaves down, deep & crunchy lo-fi aliasing)
+        float clk_dc = std::clamp(_v_dc_smooth[NodeClk], 0.0f, 1.0f);
+        float clk_fader_speed = 0.20f + 0.80f * (clk_dc * clk_dc);
+        float pad_clk_drag = 1.0f - standalone_p_clk * 0.20f;
+
+        // Ground shunt: grounding CLK (P00 <-> P05) stalls the delay motor completely (tape stop)
+        float clk_shunt = _shunt_gnd_smooth[NodeClk];
+
+        // Overclocking: P00 (CLK) <-> P02 (VCC) boosts speed up to 1.35x
+        float g_vcc_clk = _bridge_g[NodeVcc][NodeClk];
+        float clk_overclock = 1.0f + g_vcc_clk * 0.35f;
+
+        // Fast clock bridge (P00 <-> P06 when >= 35 Hz) drives digital clock decimation
+        float g_clk_dly = _bridge_g[NodeClk][NodeDly];
+        bool clk_is_slow = (_clk_rate < 35.0f);
+        float fast_clk_decim = (!clk_is_slow && g_clk_dly > 0.015f) ? (g_clk_dly * 0.45f) : 0.0f;
+
+        // OSC <-> CLK (P03 <-> P00) bridge: audio-rate FM on the delay converter clock!
+        // Directly frequency-modulates the delay clock rate, creating genuine PT2399 heterodyne bell sidebands
+        float g_osc_clk = _bridge_g[NodeOsc][NodeClk];
+        float osc_clk_fm = g_osc_clk * s_osc * 0.35f;
+
+        // Power rail sag (brownout / starve) also drags delay clock motor
+        float clk_rail_sag = 0.50f + 0.50f * (v_rail_eff * v_rail_eff);
+
+        float eff_clk_speed = (clk_fader_speed * pad_clk_drag * clk_overclock - fast_clk_decim + osc_clk_fm) * clk_shunt * clk_rail_sag;
+        eff_clk_speed = std::clamp(eff_clk_speed, 0.0f, 1.45f);
+
+        // Delay Time (S33) sets the buffer size / readhead distance directly.
+        // In Karplus zone (< 20%): responsive one-pole filter for instant string pitch tracking.
+        // In Echo / Looper zone (>= 20%): dual-head raised-cosine crossfade completely eliminates
+        // Doppler tape pitch dive, providing instant buffer length changes with rock-solid pitch!
+        float target_samples = std::clamp(base_time * _sample_rate, 28.0f, static_cast<float>(_max_delay - 2));
+        if (!_delay_time_initialized) {
             _smooth_delay_samples = target_samples;
+            _delay_time_curr = target_samples;
+            _delay_time_prev = target_samples;
+            _delay_xfade = 1.0f;
+            _delay_time_initialized = true;
+        } else if (u < 0.20f) {
+            _smooth_delay_samples += 0.025f * (target_samples - _smooth_delay_samples);
+            _delay_time_curr = _smooth_delay_samples;
+            _delay_time_prev = _smooth_delay_samples;
+            _delay_xfade = 1.0f;
         } else {
-            _smooth_delay_samples += slew_rate * diff;
+            if (_delay_xfade >= 1.0f) {
+                if (std::abs(target_samples - _delay_time_curr) > 36.0f) {
+                    _delay_time_prev = _delay_time_curr;
+                    _delay_time_curr = target_samples;
+                    _delay_xfade = 0.0f;
+                }
+            } else {
+                _delay_xfade += 0.00085f; // ~25ms crossfade at 48 kHz
+                if (_delay_xfade >= 1.0f) {
+                    _delay_xfade = 1.0f;
+                    if (std::abs(target_samples - _delay_time_curr) > 36.0f) {
+                        _delay_time_prev = _delay_time_curr;
+                        _delay_time_curr = target_samples;
+                        _delay_xfade = 0.0f;
+                    }
+                }
+            }
+            _smooth_delay_samples = _delay_time_curr;
         }
 
         // Manage Freeze state:
         // Freezing captures the delay buffer loop without overwriting it.
-        // The Delay Time knob seamlessly varispeeds / repitches and stretches the frozen loop!
+        // The Delay Time knob dynamically expands or contracts the loop window across the 16-second recorded history!
+        // The Clock Fader controls the playback speed and pitch of the frozen loop!
         if (_is_frozen) {
             if (!_was_frozen) {
                 _was_frozen = true;
-                _freeze_len = std::clamp(_smooth_delay_samples, 480.0f, static_cast<float>(_max_delay - 1));
-                _freeze_anchor = _delay_write;
+                _freeze_anchor = _delay_write_pos;
+                _freeze_len = std::clamp(_smooth_delay_samples, 28.0f, static_cast<float>(_max_delay - 2));
                 _freeze_phase = 0.0f;
             }
-            // Seamless varispeed repitch/stretch according to current delay time
-            float freeze_speed = _freeze_len / std::max(48.0f, _smooth_delay_samples);
-            freeze_speed = std::clamp(freeze_speed, 0.0625f, 16.0f);
+            // Dynamically track the Delay Time knob during Freeze!
+            float target_freeze_len = std::clamp(_smooth_delay_samples, 28.0f, static_cast<float>(_max_delay - 2));
+            _freeze_len += 0.008f * (target_freeze_len - _freeze_len);
 
-            _freeze_phase += freeze_speed;
-            while (_freeze_phase >= _freeze_len) {
-                _freeze_phase -= _freeze_len;
-            }
-            while (_freeze_phase < 0.0f) {
-                _freeze_phase += _freeze_len;
+            if (_freeze_len > 1.0f) {
+                _freeze_phase += eff_clk_speed;
+                if (_freeze_phase >= _freeze_len) {
+                    _freeze_phase = fmodf(_freeze_phase, _freeze_len);
+                } else if (_freeze_phase < 0.0f) {
+                    _freeze_phase = fmodf(_freeze_phase, _freeze_len) + _freeze_len;
+                }
+            } else {
+                _freeze_phase = 0.0f;
             }
         } else {
             _was_frozen = false;
         }
 
-        // Base read delay samples
+        // Base read delay samples (drum-tight identical timing across both channels)
         float base_read_samples = _is_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
         float read_pos_l = base_read_samples;
         float read_pos_r = base_read_samples;
+
+        // PT2399 Variclock FM Modulation (P03 OSC <-> P00 CLK):
+        // Audio-rate FM stereo widening on readheads
+        if (g_osc_clk > 0.015f) {
+            float clk_fm_depth = std::clamp(base_read_samples * 0.08f, 1.0f, 250.0f) * g_osc_clk;
+            read_pos_l += s_osc * clk_fm_depth;
+            read_pos_r -= s_osc * clk_fm_depth;
+        }
 
         // 1. P03 (OSC) <-> P06 (DLY): 3-Mode Digital Memory Mangle
         float g_osc_dly = _bridge_g[NodeOsc][NodeDly];
@@ -1008,8 +1213,6 @@ private:
         }
 
         // 2. P00 (CLK) <-> P06 (DLY): Rhythmic Glitch Stutter (< 35 Hz)
-        float g_clk_dly = _bridge_g[NodeClk][NodeDly];
-        bool clk_is_slow = (_clk_rate < 35.0f);
         if (g_clk_dly > 0.015f && clk_is_slow) {
             float stutter_len = std::clamp(base_read_samples * 0.15f, 300.0f, 6000.0f);
             bool stutter_active_l = (_clk_phase < 0.28f);
@@ -1032,37 +1235,72 @@ private:
             }
         }
 
-        // 3. P02 (VCC) <-> P06 (DLY) & Lower-Third Voltage Starve: Address Bus Slips & Freeze Glitch Loops
-        // Slips only happen via pad bridging (P02 <-> P06) OR in the lower third of voltage rail (< 0.33V)
+        // 3. P02 (VCC) <-> P06 (DLY) & Lower-Third Voltage Starve: Rhythmic CD Skips & Address-Bus Bends
+        // Musical windowed micro-repeats and harmonic power-of-two address jumps without harsh static crackle.
         float g_vcc_dly = _bridge_g[NodeVcc][NodeDly];
         float starve_slip = (v_rail_eff < 0.33f) ? ((0.33f - v_rail_eff) / 0.31f) : 0.0f;
         float glitch_intensity = std::max(g_vcc_dly, starve_slip);
+        float mod_l = read_pos_l - base_read_samples;
+        float mod_r = read_pos_r - base_read_samples;
+
+        float raw_dly_l;
+        float raw_dly_r;
+        if (!_is_frozen && u >= 0.20f && _delay_xfade < 1.0f) {
+            float fade_win = 0.5f * (1.0f - std::cos(_delay_xfade * kPi));
+            float prev_pos_l = std::clamp(_delay_time_prev + mod_l, 1.0f, static_cast<float>(_max_delay - 2));
+            float curr_pos_l = std::clamp(_delay_time_curr + mod_l, 1.0f, static_cast<float>(_max_delay - 2));
+            raw_dly_l = ReadDelay_L(prev_pos_l) * (1.0f - fade_win) + ReadDelay_L(curr_pos_l) * fade_win;
+
+            float prev_pos_r = std::clamp(_delay_time_prev + mod_r, 1.0f, static_cast<float>(_max_delay - 2));
+            float curr_pos_r = std::clamp(_delay_time_curr + mod_r, 1.0f, static_cast<float>(_max_delay - 2));
+            raw_dly_r = ReadDelay_R(prev_pos_r) * (1.0f - fade_win) + ReadDelay_R(curr_pos_r) * fade_win;
+        } else {
+            raw_dly_l = ReadDelay_L(read_pos_l);
+            raw_dly_r = ReadDelay_R(read_pos_r);
+        }
+
         if (glitch_intensity > 0.015f) {
             _slip_timer++;
             if (_slip_timer >= _slip_len) {
                 _slip_timer = 0;
-                // Micro-loop duration: 15ms (720 samples) to 140ms (6720 samples)
+                // Rhythmic grain lengths: 25ms (1200 samples) to 120ms (5760 samples), subdividing with pressure
+                uint32_t base_len = 1200 + (_lfsr % 4560);
                 _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
-                _slip_len = 720 + (_lfsr % 6000);
+                _slip_len = static_cast<uint16_t>(base_len / (1.0f + glitch_intensity * 1.5f));
+                if (_slip_len < 240) _slip_len = 240;
 
-                // Memory address bus jump / slip across delay buffer history
+                // Power-of-two address bus jump (512, 1024, 2048, 4096, 8192, 16384 samples)
+                // Creates harmonic octave repeats and rhythmic sub-delays
+                static const float kAddressJumps[6] = {512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f};
+                uint8_t jump_idx = (_lfsr >> 3) % 6;
                 _lfsr = (_lfsr >> 1) ^ (-(_lfsr & 1u) & 0xB400u);
-                float max_slip = std::min(48000.0f, base_read_samples * 0.80f);
-                _slip_offset_l = static_cast<float>(_lfsr % static_cast<uint32_t>(max_slip + 1.0f));
-                _slip_offset_r = _slip_offset_l * 0.95f;
+                _slip_offset_l = kAddressJumps[jump_idx];
+                _slip_offset_r = kAddressJumps[(jump_idx + 1) % 6];
             }
 
-            // Slipped readhead positions with chaotic micro-repeats
+            // Smooth 2.5ms (120 samples) anti-click raised-cosine window on grain edges
+            float grain_win = 1.0f;
+            constexpr uint16_t kFadeLen = 120;
+            if (_slip_timer < kFadeLen) {
+                grain_win = static_cast<float>(_slip_timer) / static_cast<float>(kFadeLen);
+            } else if (_slip_len - _slip_timer < kFadeLen) {
+                grain_win = static_cast<float>(_slip_len - _slip_timer) / static_cast<float>(kFadeLen);
+            }
+            grain_win = 0.5f * (1.0f - std::cos(grain_win * kPi)); // raised-cosine smoothing
+
+            // Read the slipped address grain
             float micro_pos = static_cast<float>(_slip_timer);
-            read_pos_l = std::clamp(read_pos_l - micro_pos + _slip_offset_l * glitch_intensity, 1.0f, static_cast<float>(_max_delay - 2));
-            read_pos_r = std::clamp(read_pos_r - ((_slip_timer + 300) % _slip_len) + _slip_offset_r * glitch_intensity, 1.0f, static_cast<float>(_max_delay - 2));
+            float slip_read_pos_l = std::clamp(read_pos_l - micro_pos + _slip_offset_l, 1.0f, static_cast<float>(_max_delay - 2));
+            float slip_read_pos_r = std::clamp(read_pos_r - micro_pos + _slip_offset_r, 1.0f, static_cast<float>(_max_delay - 2));
+
+            float slipped_l = ReadDelay_L(slip_read_pos_l);
+            float slipped_r = ReadDelay_R(slip_read_pos_r);
+
+            // Crossfade smoothly into the micro-stutter grain without DC clicks or bacon crackle
+            float g_blend = glitch_intensity * grain_win;
+            raw_dly_l = raw_dly_l * (1.0f - g_blend) + slipped_l * g_blend;
+            raw_dly_r = raw_dly_r * (1.0f - g_blend) + slipped_r * g_blend;
         }
-
-        read_pos_l = std::max(1.0f, read_pos_l);
-        read_pos_r = std::max(1.0f, read_pos_r);
-
-        float raw_dly_l = ReadDelay_L(read_pos_l);
-        float raw_dly_r = ReadDelay_R(read_pos_r);
 
         // 3. P01 (RST) <-> P06 (DLY): 90° Quadrature Stereo Reverse Pitch Cloud
         float g_rst_dly = _bridge_g[NodeRst][NodeDly];
@@ -1082,9 +1320,9 @@ private:
             float d2_l = read_pos_l + (1.0f - p2_l) * rev_window;
             float s1_l = ReadDelay_L(d1_l);
             float s2_l = ReadDelay_L(d2_l);
-            float w1_l = std::sin(p1_l * 3.14159265f);
-            float w2_l = std::sin(p2_l * 3.14159265f);
-            float rev_read_l = s1_l * (w1_l * w1_l) + s2_l * (w2_l * w2_l);
+            float w1_l = 4.0f * p1_l * (1.0f - p1_l);
+            float w2_l = 4.0f * p2_l * (1.0f - p2_l);
+            float rev_read_l = (s1_l * w1_l + s2_l * w2_l) / (w1_l + w2_l + 1e-6f);
 
             // Head 1 & Head 2 for Right (90 deg quadrature phase offset)
             float p1_r = _rev_phase_l + 0.25f;
@@ -1096,9 +1334,9 @@ private:
             float d2_r = read_pos_r + (1.0f - p2_r) * rev_window;
             float s1_r = ReadDelay_R(d1_r);
             float s2_r = ReadDelay_R(d2_r);
-            float w1_r = std::sin(p1_r * 3.14159265f);
-            float w2_r = std::sin(p2_r * 3.14159265f);
-            float rev_read_r = s1_r * (w1_r * w1_r) + s2_r * (w2_r * w2_r);
+            float w1_r = 4.0f * p1_r * (1.0f - p1_r);
+            float w2_r = 4.0f * p2_r * (1.0f - p2_r);
+            float rev_read_r = (s1_r * w1_r + s2_r * w2_r) / (w1_r + w2_r + 1e-6f);
 
             raw_dly_l += g_rst_dly * (rev_read_l - raw_dly_l);
             raw_dly_r += g_rst_dly * (rev_read_r - raw_dly_r);
@@ -1108,24 +1346,6 @@ private:
         float string_damp = daisysp::fclamp((0.25f + 0.72f * _v_dc_smooth[NodeFlt]) * (0.65f + 0.35f * v_rail_eff), 0.05f, 0.98f);
         _damp_l += string_damp * (raw_dly_l - _damp_l);
         _damp_r += string_damp * (raw_dly_r - _damp_r);
-
-        // S36 Clock Fader directly controls the delay converter aliasing clock:
-        // Top of fader (1.0) = 48 kHz (pristine clean)
-        // Sliding down drops sample rate down to ~3.8 kHz with wild metallic aliasing mirror tones!
-        float clk_dc = std::clamp(_v_dc_smooth[NodeClk], 0.0f, 1.0f);
-        float clk_fader_speed = 0.08f + 0.92f * (clk_dc * clk_dc);
-
-        // Fast clock bridge (P00 <-> P06 when >= 35 Hz) also drives sample decimation
-        float fast_clk_decim = (!clk_is_slow && g_clk_dly > 0.015f) ? (g_clk_dly * 0.75f) : 0.0f;
-
-        // OSC <-> CLK (P03 <-> P00) bridge: audio-rate FM on the delay converter clock!
-        // Creates vintage PT2399 clock heterodyne sidebands and ring-mod bells on delay audio
-        float g_osc_clk = _bridge_g[NodeOsc][NodeClk];
-        float osc_clk_fm = g_osc_clk * s_osc * 0.35f;
-
-        // Standalone touch on Pad 0 drags clock down dynamically under finger pressure
-        float eff_clk_speed = clk_fader_speed * (1.0f - standalone_p_clk * 0.75f) - fast_clk_decim + osc_clk_fm;
-        eff_clk_speed = std::clamp(eff_clk_speed, 0.04f, 1.0f);
 
         // 4. P02 (VCC) <-> P06 (DLY): Digital DAC ladder starve & bit crushing
         // (g_vcc_dly and glitch_intensity resolved above)
@@ -1154,10 +1374,11 @@ private:
                 dly_proc_l = _damp_l + lofi_blend * (proc_l - _damp_l);
                 dly_proc_r = _damp_r + lofi_blend * (proc_r - _damp_r);
             } else {
-                float bit_depth = 16.0f - g_vcc_dly * 12.0f - starve * 8.0f - (1.0f - eff_clk_speed) * 8.0f;
-                float levels = FastPow2(std::clamp(bit_depth, 3.0f, 16.0f));
+                float bit_depth = 16.0f - g_vcc_dly * 4.0f - starve * 8.0f - (1.0f - eff_clk_speed) * 6.0f;
+                bit_depth = std::clamp(bit_depth, 8.0f, 16.0f);
+                float levels = FastPow2(bit_depth);
                 float inv_levels = 1.0f / levels;
-                float dac_dnl = 0.05f + g_vcc_dly * 0.40f + starve * 0.35f + (1.0f - eff_clk_speed) * 0.20f;
+                float dac_dnl = 0.05f + g_vcc_dly * 0.15f + starve * 0.35f + (1.0f - eff_clk_speed) * 0.15f;
 
                 float out_lofi_l = QuantizeDac(proc_l, levels, inv_levels, dac_dnl);
                 float out_lofi_r = QuantizeDac(proc_r, levels, inv_levels, dac_dnl);
@@ -1173,7 +1394,7 @@ private:
         // Stereo feedback calculation:
         // Allows infinite sustain (= 1.00) at top of feedback fader for sound-on-sound looping
         // Bridging P04 (FLT) <-> P07 (FBK) drives feedback into howling analog dub oscillation
-        float max_fb = (base_time < 0.025f) ? 0.992f : 1.00f;
+        float max_fb = (base_time < 0.025f) ? 0.992f : 1.10f;
         float base_fb = _v_dc_smooth[NodeFbk] * (max_fb + 0.05f * starve);
         base_fb += standalone_p_fbk * 0.30f;
         float flt_fb_boost = _bridge_g[NodeFlt][NodeFbk] * 0.65f;
@@ -1186,15 +1407,16 @@ private:
         }
         eff_fb = std::clamp(eff_fb, 0.0f, 1.40f);
 
-        // Ping-pong cross-feed on DLY <-> FBK bridge (P06 <-> P07)
+        // Drum-tight rhythmic ping-pong cross-coupling:
+        // Left and Right share identical delay time T (base_read_samples),
+        // guaranteeing that percussive transients land 100% on the beat with zero flamming.
+        // Nominal unbridged mode provides a tight, musical cross-coupling (68% direct, 32% cross).
+        // Bridging P06 (DLY) <-> P07 (FBK) elevates cross-coupling to 100% full ping-pong rotation!
         float g_dly_fbk = _bridge_g[NodeDly][NodeFbk];
-        float fb_direct_l = _damp_l * eff_fb;
-        float fb_direct_r = _damp_r * eff_fb;
-        float fb_cross_l  = _damp_r * (g_dly_fbk * 0.70f);
-        float fb_cross_r  = _damp_l * (g_dly_fbk * 0.70f);
-
-        float fb_tot_l = fb_direct_l + fb_cross_l;
-        float fb_tot_r = fb_direct_r + fb_cross_r;
+        float cross = 0.32f + 0.68f * g_dly_fbk;
+        float direct = 1.0f - cross;
+        float fb_tot_l = (_damp_l * direct + _damp_r * cross) * eff_fb;
+        float fb_tot_r = (_damp_r * direct + _damp_l * cross) * eff_fb;
 
         // P04 (FLT) <-> P07 (FBK) Dub Delay Loop:
         // Routes the delay feedback path through the resonant SVF filter!
@@ -1202,6 +1424,18 @@ private:
         if (g_flt_fbk > 0.015f) {
             fb_tot_l = fb_tot_l * (1.0f - g_flt_fbk) + flt_low_l * eff_fb * g_flt_fbk * 1.05f;
             fb_tot_r = fb_tot_r * (1.0f - g_flt_fbk) + flt_low_r * eff_fb * g_flt_fbk * 1.05f;
+        }
+
+        // P03 (OSC) <-> P07 (FBK): Chaotic Delayed Self-FM & Recirculating Modulator
+        // Closed-loop dynamical system: the probe oscillator cross-modulates the delay feedback loop,
+        // while the delay output audio simultaneously frequency-modulates the probe oscillator via _inj_osc!
+        // Generates morphing alien sidebands, multiphonic whistling, and bubbling self-FM textures.
+        float g_osc_fbk = _bridge_g[NodeOsc][NodeFbk];
+        if (g_osc_fbk > 0.015f) {
+            float mod_l = 1.0f + s_osc * 0.95f * g_osc_fbk;
+            float mod_r = 1.0f - s_osc * 0.95f * g_osc_fbk; // quadrature phase spread
+            fb_tot_l = fb_tot_l * mod_l + s_osc * 0.40f * g_osc_fbk;
+            fb_tot_r = fb_tot_r * mod_r - s_osc * 0.40f * g_osc_fbk;
         }
 
         // Bridge inputs directly into delay buffer
@@ -1233,17 +1467,22 @@ private:
             }
         }
 
+
         // Non-destructive Freeze & Low-Voltage Memory Glitch:
         // When _is_frozen is true OR under deep starve / VCC<->DLY glitch OR during RST<->GND clear,
         // write operations to SDRAM buffer are completely bypassed!
         // All bends operate live on readhead pointers and DAC, preserving the captured audio loop forever.
         bool delay_write_inhibited = _is_frozen || (glitch_intensity > 0.15f) || (_rst_gnd_hold > 0);
         if (!delay_write_inhibited) {
-            float dly_in_l = flt_low_l + amp_to_dly_l + flt_to_dly_l + osc_to_dly_l + FastTanh(fb_tot_l);
-            float dly_in_r = flt_low_r + amp_to_dly_r + flt_to_dly_r + osc_to_dly_r + FastTanh(fb_tot_r);
+            float eff_fb_in_l = FastTanh(fb_tot_l);
+            float eff_fb_in_r = FastTanh(fb_tot_r);
+            float dly_in_l = flt_low_l + amp_to_dly_l + flt_to_dly_l + osc_to_dly_l + eff_fb_in_l;
+            float dly_in_r = flt_low_r + amp_to_dly_r + flt_to_dly_r + osc_to_dly_r + eff_fb_in_r;
             dly_in_l = _dc_block_dly_l.Process(dly_in_l);
             dly_in_r = _dc_block_dly_r.Process(dly_in_r);
-            WriteDelay_Stereo(dly_in_l, dly_in_r);
+            WriteDelay_Stereo(dly_in_l, dly_in_r, eff_clk_speed);
+        } else if (!_is_frozen) {
+            AdvanceDelayWrite(eff_clk_speed);
         }
 
         _prev_dly_read_l = dly_dac_l;
@@ -1261,8 +1500,8 @@ private:
         float mix_direct_tap_r = s_inj[NodeMix][1] * 0.85f;
 
         // External inputs (scaled by input volume and shunted if P10 IN is grounded)
-        float ext_l_gated = ext_l * _amp_in_vol * 0.50f * _shunt_gnd_smooth[NodeIn];
-        float ext_r_gated = ext_r * _amp_in_vol * 0.50f * _shunt_gnd_smooth[NodeIn];
+        float ext_l_gated = ext_l * _amp_in_vol * 0.25f * _shunt_gnd_smooth[NodeIn];
+        float ext_r_gated = ext_r * _amp_in_vol * 0.25f * _shunt_gnd_smooth[NodeOut];
 
         float dry_l = (flt_low_l + ext_l_gated + mix_direct_tap_l + out_direct_tap_l) * _shunt_gnd_smooth[NodeAmp];
         float dry_r = (flt_low_r + ext_r_gated + mix_direct_tap_r + out_direct_tap_r) * _shunt_gnd_smooth[NodeAmp];
@@ -1318,40 +1557,61 @@ private:
 
     inline float ReadDelay_L(float delay_samples) const {
         if (!_delay_buf_l || _max_delay == 0) return 0.0f;
-        if (delay_samples < 1.0f) delay_samples = 1.0f;
+        if (std::isnan(delay_samples) || delay_samples < 1.0f) delay_samples = 1.0f;
+        else if (delay_samples >= static_cast<float>(_max_delay - 2)) delay_samples = static_cast<float>(_max_delay - 2);
+
         float max_d = static_cast<float>(_max_delay);
-        float read_pos = static_cast<float>(_delay_write) - delay_samples;
+        float read_pos = _delay_write_pos - delay_samples;
         while (read_pos < 0.0f) read_pos += max_d;
         while (read_pos >= max_d) read_pos -= max_d;
+
         size_t idx0 = static_cast<size_t>(read_pos);
-        if (idx0 >= _max_delay) idx0 = 0;
+        if (idx0 >= _max_delay - 1) idx0 = _max_delay - 2;
         size_t idx1 = idx0 + 1;
-        if (idx1 >= _max_delay) idx1 = 0;
+
         float frac = read_pos - static_cast<float>(idx0);
         return _delay_buf_l[idx0] + frac * (_delay_buf_l[idx1] - _delay_buf_l[idx0]);
     }
 
     inline float ReadDelay_R(float delay_samples) const {
         if (!_delay_buf_r || _max_delay == 0) return 0.0f;
-        if (delay_samples < 1.0f) delay_samples = 1.0f;
+        if (std::isnan(delay_samples) || delay_samples < 1.0f) delay_samples = 1.0f;
+        else if (delay_samples >= static_cast<float>(_max_delay - 2)) delay_samples = static_cast<float>(_max_delay - 2);
+
         float max_d = static_cast<float>(_max_delay);
-        float read_pos = static_cast<float>(_delay_write) - delay_samples;
+        float read_pos = _delay_write_pos - delay_samples;
         while (read_pos < 0.0f) read_pos += max_d;
         while (read_pos >= max_d) read_pos -= max_d;
+
         size_t idx0 = static_cast<size_t>(read_pos);
-        if (idx0 >= _max_delay) idx0 = 0;
+        if (idx0 >= _max_delay - 1) idx0 = _max_delay - 2;
         size_t idx1 = idx0 + 1;
-        if (idx1 >= _max_delay) idx1 = 0;
+
         float frac = read_pos - static_cast<float>(idx0);
         return _delay_buf_r[idx0] + frac * (_delay_buf_r[idx1] - _delay_buf_r[idx0]);
     }
 
-    inline void WriteDelay_Stereo(float sample_l, float sample_r) {
+    inline void WriteDelay_Stereo(float sample_l, float sample_r, float speed) {
         if (!_delay_buf_l || !_delay_buf_r || _max_delay == 0) return;
-        _delay_buf_l[_delay_write] = sample_l;
-        _delay_buf_r[_delay_write] = sample_r;
-        if (++_delay_write >= _max_delay) {
-            _delay_write = 0;
+        size_t idx = static_cast<size_t>(_delay_write_pos);
+        if (idx >= _max_delay) idx = 0;
+        _delay_buf_l[idx] = sample_l;
+        _delay_buf_r[idx] = sample_r;
+        _delay_write_pos += speed;
+        if (_delay_write_pos >= static_cast<float>(_max_delay)) {
+            _delay_write_pos -= static_cast<float>(_max_delay);
+        } else if (_delay_write_pos < 0.0f) {
+            _delay_write_pos += static_cast<float>(_max_delay);
+        }
+    }
+
+    inline void AdvanceDelayWrite(float speed) {
+        if (_max_delay == 0) return;
+        _delay_write_pos += speed;
+        if (_delay_write_pos >= static_cast<float>(_max_delay)) {
+            _delay_write_pos -= static_cast<float>(_max_delay);
+        } else if (_delay_write_pos < 0.0f) {
+            _delay_write_pos += static_cast<float>(_max_delay);
         }
     }
 
@@ -1383,6 +1643,7 @@ private:
     float _amp_pluck{0.0f};
     float _motorboat_phase{0.0f};
     float _amp_in_vol{1.0f};
+    float _g_osc_amp_smooth{0.0f};
 
     // Resonant Filter (TPT SVF Stereo)
     float _knob_flt_pos{0.65f};
@@ -1398,7 +1659,12 @@ private:
     // Delay & Lo-Fi Stereo Processor (Dual SDRAM buffers)
     float _knob_dly_pos{0.50f};
     float _knob_fbk_pos{0.40f};
-    float _smooth_delay_samples{12.0f};
+    float _smooth_delay_samples{28.0f};
+    float _dly_knob_held{0.50f};
+    float _delay_time_curr{28.0f};
+    float _delay_time_prev{28.0f};
+    float _delay_xfade{1.0f};
+    bool  _delay_time_initialized{false};
     float _damp_l{0.0f};
     float _damp_r{0.0f};
     float _prev_dly_read_l{0.0f};
@@ -1406,14 +1672,14 @@ private:
     float* _delay_buf_l{nullptr};
     float* _delay_buf_r{nullptr};
     size_t _max_delay{0};
-    size_t _delay_write{0};
+    float _delay_write_pos{0.0f};
     LoFiDelayModel _lofi_l;
     LoFiDelayModel _lofi_r;
     bool  _is_frozen{false};
     bool  _was_frozen{false};
     float _freeze_len{48000.0f};
     float _freeze_phase{0.0f};
-    size_t _freeze_anchor{0};
+    float _freeze_anchor{0.0f};
     bool  _rst_tap{false};
     float _rev_phase_l{0.0f};
     float _rev_phase_r{0.0f};
@@ -1439,6 +1705,7 @@ private:
     // Ground shunts (target and per-sample smoothed)
     float        _shunt_gnd_target[12];
     float        _shunt_gnd_smooth[12];
+    float        _bridged_weight[12]{0.0f};
 
     // Resolved DC node voltages (target and per-sample smoothed)
     float _v_dc_target[12]{0.5f};
@@ -1464,12 +1731,13 @@ private:
     DcBlocker _dc_block_dly_l;
     DcBlocker _dc_block_dly_r;
 
-    // Stereo Chassis Contact Mic (Pad 10 IN)
+    // Stereo Chassis Contact Mic (Pad 10 IN / Pad 11 OUT)
     synthux::ContactMicModel _contact_mic;
+    PadGestureTracker _tracker_p10;
+    PadGestureTracker _tracker_p11;
     float _rub_speed_p10{0.0f};
-    float _prev_p10_rub{0.0f};
-    uint16_t _p10_tap_cooldown{0};
-    uint16_t _p10_settle_cooldown{0};
+    float _rub_speed_p11{0.0f};
+    uint8_t _rest_scans[12]{10};
 };
 
 } // namespace bends

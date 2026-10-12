@@ -144,8 +144,8 @@ int main(void) {
     hw.usb_handle.SetReceiveCallback(UsbRxCallback, UsbHandle::UsbPeriph::FS_INTERNAL);
 
     while (1) {
-        touch.Process();
-        controller.Process(hw, touch, loop_counter);
+        bool new_scan = touch.Process();
+        controller.Process(hw, touch, loop_counter, new_scan);
 
         // Only stream telemetry if an external visualizer/host explicitly enabled it with 't'
         if (g_telemetry_enabled && (loop_counter % 16) == 0) {

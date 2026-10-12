@@ -36,8 +36,8 @@ public:
         _synth.SetSwitches(osc_mode, is_frozen);
     }
 
-    void SetPressures(const float pressures[12]) {
-        _synth.SetPressures(pressures);
+    void SetPressures(const float pressures[12], bool new_scan = true) {
+        _synth.SetPressures(pressures, new_scan);
     }
 
     void SetProximities(const float proximities[12]) {

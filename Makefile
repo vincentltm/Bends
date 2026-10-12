@@ -1,5 +1,5 @@
 TARGET = bends
-OPT = -O2
+OPT = -Os
 CPP_STANDARD = -std=gnu++17
 
 CPP_SOURCES = \

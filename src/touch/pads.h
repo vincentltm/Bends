@@ -37,7 +37,7 @@ public:
     }
 
     void Init(daisy::DaisySeed& hw);
-    void Process();
+    bool Process();
     void Recalibrate();
 
     // Response curve: true = quadratic (natural finger pulp resistance), false = linear

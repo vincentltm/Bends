@@ -25,12 +25,13 @@ public:
         hw.adc.Start();
     }
 
-    void Process() {
-        _pads.Process();
+    bool Process() {
+        bool updated = _pads.Process();
         _knobs.Process();
         if (_air.IsEnabled()) {
             _air.Process(_pads);
         }
+        return updated;
     }
 
     Knobs& knobs() { return _knobs; }

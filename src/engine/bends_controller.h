@@ -21,7 +21,7 @@ public:
     }
 
     // Call once per audio block (750 Hz)
-    void Process(daisy::DaisySeed& /*hw*/, synthux::Touch& touch, uint32_t loop_counter) {
+    void Process(daisy::DaisySeed& /*hw*/, synthux::Touch& touch, uint32_t loop_counter, bool new_scan = true) {
         if (!_engine) return;
 
         // 1. Process Hardware Switches
@@ -58,7 +58,7 @@ public:
             pressures[i]   = touch.pads().Pressure(i);
             proximities[i] = touch.air().PadProximity(i);
         }
-        _engine->SetPressures(pressures);
+        _engine->SetPressures(pressures, new_scan);
         _engine->SetProximities(proximities);
 
         // 3. Update Resistor Node Network
