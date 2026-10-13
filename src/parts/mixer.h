@@ -33,8 +33,8 @@ public:
             eff_wet_r = eff_wet_r * (1.0f - d_amt * 0.5f) + diff_r * d_amt * 0.65f;
         }
 
-        float mixed_l = ((1.0f - mix_wet) * eff_dry_l + mix_wet * eff_wet_l + (tap_mix_l + tap_out_l) * 0.45f) * shunt_mix * shunt_out * 0.75f;
-        float mixed_r = ((1.0f - mix_wet) * eff_dry_r + mix_wet * eff_wet_r + (tap_mix_r + tap_out_r) * 0.45f) * shunt_mix * shunt_out * 0.75f;
+        float mixed_l = ((1.0f - mix_wet) * eff_dry_l + mix_wet * eff_wet_l + (tap_mix_l + tap_out_l) * 0.45f) * shunt_mix * shunt_out;
+        float mixed_r = ((1.0f - mix_wet) * eff_dry_r + mix_wet * eff_wet_r + (tap_mix_r + tap_out_r) * 0.45f) * shunt_mix * shunt_out;
 
         // Master output filter isolator (P04 FLT <-> P09 MIX)
         if (mods.filter_isolate > 0.015f) {

@@ -147,8 +147,6 @@ public:
         _delay.PrepareBlock(frame.s33_dly, frame.s32_clk, _solver.Pull(NodeDly), _solver.Pull(NodeClk));
         _preamp.PrepareBlock(frame.s30_amp, _solver.Pull(NodeAmp));
 
-        float dry_in_scale = _preamp.InputVolume() * 0.25f * _solver.Retention(NodeIn);
-        float dry_out_scale = _preamp.InputVolume() * 0.25f * _solver.Retention(NodeOut);
 
         bool has_dyn = (_bend_engine.NumDynamicRoutes() > 0);
         BoardMods static_mods = _bend_engine.BaseMods();
@@ -237,9 +235,9 @@ public:
             _hum.Tick(vcc, starve, gnd_touch, frame.proximities[NodeGnd], touched_sum, s_hum);
             s_hum *= _solver.Retention(NodeGnd);
 
-            // Contact Mic
+            // Contact Mic (Processes tactile rubbing & tapping gestures only)
             float mic_l = 0.0f, mic_r = 0.0f;
-            _contact_mic.Process(inl, inr, frame.pressures[NodeIn], frame.rub_speed_p10,
+            _contact_mic.Process(0.0f, 0.0f, frame.pressures[NodeIn], frame.rub_speed_p10,
                                  frame.pressures[NodeOut], frame.rub_speed_p11, mic_l, mic_r);
 
             // Electro-Acoustic Body Feedback Screamer (Bend 6: P10 IN <-> P11 OUT)
@@ -253,12 +251,16 @@ public:
             mic_l *= _solver.Retention(NodeIn);
             mic_r *= _solver.Retention(NodeOut);
 
-            // Preamp: receives mic + direct capacitive oscillator bridge injection + AC cross-injections
+            // Clean external line audio with NodeIn ground shunt retention
+            float in_ext_l = inl * _solver.Retention(NodeIn);
+            float in_ext_r = inr * _solver.Retention(NodeIn);
+
+            // Preamp: receives direct clean external audio + body mic + direct capacitive oscillator bridge injection + AC cross-injections
             float amp_l = 0.0f, amp_r = 0.0f;
             float osc_inject = s_osc * cap_g_osc_amp * 1.50f + s_inj[NodeAmp][0];
             PreampMods pmods = mods.preamp;
             pmods.ring_mod = cap_g_osc_amp; // Ring mod crossfade tracks capacitive envelope
-            _preamp.Process(mic_l + s_inj[NodeIn][0], mic_r + s_inj[NodeIn][1],
+            _preamp.Process(in_ext_l + mic_l + s_inj[NodeIn][0], in_ext_r + mic_r + s_inj[NodeIn][1],
                             press_amp_ret,
                             pmods,
                             osc_inject, s_hum, vcc, starve, _solver.Retention(NodeAmp),
@@ -322,10 +324,10 @@ public:
                 _diffuser.Process(dly_l, dly_r, diff_l, diff_r);
             }
 
-            // Mixer & Master Output
+            // Mixer & Master Output (Pure phase-coherent dry audio: zero comb filtering)
             float sig_l = 0.0f, sig_r = 0.0f;
-            float dry_l = flt_l + inl * dry_in_scale;
-            float dry_r = flt_r + inr * dry_out_scale;
+            float dry_l = flt_l;
+            float dry_r = flt_r;
 
             _mixer.Process(dry_l, dry_r, dly_l, dly_r,
                            frame.s35_mix, _solver.Pull(NodeMix),
@@ -346,20 +348,21 @@ public:
             _prev_node_sig[NodeFbk][0] = dly_l;  _prev_node_sig[NodeFbk][1] = dly_r;
             _prev_node_sig[NodeAmp][0] = amp_l;  _prev_node_sig[NodeAmp][1] = amp_r;
             _prev_node_sig[NodeMix][0] = sig_l;  _prev_node_sig[NodeMix][1] = sig_r;
-            _prev_node_sig[NodeIn][0]  = mic_l;  _prev_node_sig[NodeIn][1]  = mic_r;
+            _prev_node_sig[NodeIn][0]  = in_ext_l + mic_l;  _prev_node_sig[NodeIn][1]  = in_ext_r + mic_r;
             _prev_node_sig[NodeOut][0] = sig_l;  _prev_node_sig[NodeOut][1] = sig_r;
             _prev_node_sig[NodeVcc][0] = s_inj[NodeVcc][0];
             _prev_node_sig[NodeVcc][1] = s_inj[NodeVcc][1];
 
-            // DC Blocking & Limiting
+            // DC Blocking & Clean Headroom Protection
             sig_l = _dc_block_out_l.Process(sig_l);
             sig_r = _dc_block_out_r.Process(sig_r);
 
             if (std::isnan(sig_l) || std::isinf(sig_l)) sig_l = 0.0f;
             if (std::isnan(sig_r) || std::isinf(sig_r)) sig_r = 0.0f;
 
-            sig_l = daisysp::SoftLimit(sig_l);
-            sig_r = daisysp::SoftLimit(sig_r);
+            // Transparent DAC output limiter: bit-perfect linear up to 0.88, silky soft-clip above
+            sig_l = LimitOutput(sig_l);
+            sig_r = LimitOutput(sig_r);
 
             out_l[n] = sig_l * boot_gain;
             out_r[n] = sig_r * boot_gain;
@@ -379,6 +382,14 @@ public:
     const ContactMic& GetContactMic() const { return _contact_mic; }
 
 private:
+    static inline float LimitOutput(float x) {
+        float mag = std::abs(x);
+        if (mag <= 0.88f) return x;
+        float span = 0.11f;
+        float sat = 0.88f + span * FastTanh((mag - 0.88f) / span);
+        return (x >= 0.0f) ? sat : -sat;
+    }
+
     float _sample_rate{48000.0f};
 
     Contacts    _contacts;

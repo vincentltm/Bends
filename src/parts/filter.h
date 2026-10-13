@@ -32,7 +32,7 @@ public:
 
     inline void PrepareBlock(float knob_flt, float node_pull, float touch_flt, float air_hover) {
         float flt_dc = std::clamp(knob_flt + node_pull * 0.20f + 0.15f * touch_flt + air_hover * 0.12f, 0.0f, 1.0f);
-        _base_freq = 35.0f * FastPow2(flt_dc * 8.6f);
+        _base_freq = 28.0f * FastPow2(flt_dc * 9.6f);
     }
 
     inline void Process(float in_l, float in_r,
@@ -59,7 +59,7 @@ public:
         if (std::abs(mods.clock_step) > 0.001f) {
             freq *= FastPow2(mods.clock_step * 1.5f);
         }
-        freq = std::clamp(freq, 25.0f, 19000.0f);
+        freq = std::clamp(freq, 25.0f, 21500.0f);
 
         // Ping impulses
         if (mods.ping > 0.0f) {
@@ -75,8 +75,9 @@ public:
             _ping_env *= 0.9994f; // ~150 ms ring tail
         }
 
-        // Resonance
-        float res_raw = 0.58f + touch_flt * 0.35f + _ping_env * 0.22f + mods.resonance;
+        // Resonance: flat Butterworth passband when untouched (res_raw = 0.0)
+        // Pad 04 (FLT) pressure smoothly sweeps resonance into ringing self-oscillation
+        float res_raw = touch_flt * 0.82f + _ping_env * 0.35f + mods.resonance;
         res_raw *= shunt_gnd;
         res_raw = std::clamp(res_raw, 0.0f, 0.98f);
 
@@ -84,7 +85,7 @@ public:
         starve_choke = starve_choke + (1.0f - starve_choke) * std::min(1.0f, mods.howl * 1.4f);
         float res_eff = res_raw * starve_choke;
 
-        float R = 0.45f * (1.0f - std::clamp(res_eff, 0.0f, 0.98f)) + 0.02f;
+        float R = 0.707f * (1.0f - std::clamp(res_eff, 0.0f, 0.96f)) + 0.025f;
         float starve_damping = (v_rail_eff < 0.50f) ? (0.50f - v_rail_eff) * 1.6f : 0.0f;
         starve_damping *= (1.0f - std::min(1.0f, mods.howl * 1.5f));
         R += starve_damping;
@@ -100,8 +101,8 @@ public:
         g = std::clamp(g, 0.001f, 1.25f);
         float h = 1.0f / (1.0f + 2.0f * R * g + g * g);
 
-        float flt_headroom = (v_rail_eff > 0.45f) ? (0.80f + 0.20f * ((v_rail_eff - 0.45f) / 0.55f))
-                                                  : (0.25f + 0.55f * (v_rail_eff / 0.45f));
+        float flt_headroom = (v_rail_eff > 0.45f) ? (1.50f + 0.30f * ((v_rail_eff - 0.45f) / 0.55f))
+                                                  : (0.35f + 1.15f * (v_rail_eff / 0.45f));
 
         float starve_drive = std::max(0.0f, starve - 0.55f) * 0.70f;
         float drive = 1.0f + mods.drive + starve_drive;
@@ -150,8 +151,17 @@ public:
 
 private:
     inline float Saturate(float x, float headroom, float starve) const {
-        float h_pos = headroom * (1.0f - 0.20f * starve);
-        float h_neg = headroom * (1.0f + 0.08f * starve);
+        if (starve < 0.02f) {
+            float mag = std::abs(x);
+            if (mag <= 1.05f) return x;
+            float span = 0.35f;
+            float sat = 1.05f + span * FastTanh((mag - 1.05f) / span);
+            return (x >= 0.0f) ? sat : -sat;
+        }
+
+        float h = headroom * (1.0f - 0.40f * starve);
+        float h_pos = h * (1.0f - 0.20f * starve);
+        float h_neg = h * (1.0f + 0.08f * starve);
         float sat = (x >= 0.0f) ? (h_pos * FastTanh(x / h_pos)) : (h_neg * FastTanh(x / h_neg));
 
         if (starve > 0.70f) {
