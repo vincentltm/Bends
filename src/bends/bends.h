@@ -18,21 +18,16 @@ constexpr Bend kBends[] = {
     { NodeClk, NodeDly, Verb::Modulate, Slot::DlyDecimate,   Sig::One,       0.45f, When::ClkFast },
     // CLK <-> OSC: Clock divider triggers sub-octave flip-flop
     { NodeClk, NodeOsc, Verb::Set,      Slot::OscSubOctave,  Sig::One,       0.85f, When::ClkSlow },
-
-    // CLK <-> GND: Half-time / triplet clock breakdown (Bend 3)
-    { NodeClk, NodeGnd, Verb::Set,      Slot::ClkSubDiv,     Sig::One,       0.50f, When::Always },
+    // CLK <-> GND: Pressure-sensitive beat-repeat & machine-gun micro-looper roll
+    { NodeClk, NodeGnd, Verb::Set,      Slot::DlyBeatRepeat, Sig::One,       1.00f, When::Always },
+    // CLK <-> FBK: Top-arch pinch dub echo squeeze (rhythmic feedback gating)
+    { NodeClk, NodeFbk, Verb::Modulate, Slot::FbkClockBurst, Sig::ClkPulse,  0.85f, When::Always },
 
     // -------------------------------------------------------------
-    // P01 (RST) Bends
+    // P01 (RST) Utility
     // -------------------------------------------------------------
-    // RST <-> GND: Hardware memory flush & feedback dump
+    // RST <-> GND: Hardware memory flush & feedback dump (Panic Clear)
     { NodeRst, NodeGnd, Verb::Flush,    Slot::None,          Sig::One,       1.00f, When::Always },
-    // RST <-> FBK: Instant beat-repeat / micro-looper freeze (Bend 4)
-    { NodeRst, NodeFbk, Verb::Set,      Slot::DlyBeatRepeat, Sig::One,       1.00f, When::Always },
-    // RST <-> DLY: 90° quadrature reverse pitch cloud
-    { NodeRst, NodeDly, Verb::Set,      Slot::DlyReverse,    Sig::One,       1.00f, When::Always },
-    // RST <-> OSC: Hard phase sync
-    { NodeRst, NodeOsc, Verb::Sync,     Slot::OscPhase,      Sig::ClkPulse,  1.00f, When::Always },
 
     // -------------------------------------------------------------
     // P07 (VCC) Bends
@@ -87,6 +82,10 @@ constexpr Bend kBends[] = {
     // -------------------------------------------------------------
     // P06 / P02 (DLY / FBK) Bends
     // -------------------------------------------------------------
+    // DLY <-> GND: Tape motor brake spin-down stop
+    { NodeDly, NodeGnd, Verb::Set,      Slot::DlyTapeStop,   Sig::One,       1.00f, When::Always },
+    // DLY <-> MIX: Right-side lower pinch 90° quadrature reverse pitch cloud
+    { NodeDly, NodeMix, Verb::Set,      Slot::DlyReverse,    Sig::One,       1.00f, When::Always },
     // DLY <-> FBK: Elevated ping-pong rotation cross-coupling
     { NodeDly, NodeFbk, Verb::Set,      Slot::DlyPingPong,   Sig::One,       0.68f, When::Always },
     // FBK <-> MIX: Diffuser spring reverb wash

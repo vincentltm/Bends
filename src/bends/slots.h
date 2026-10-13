@@ -32,11 +32,13 @@ enum class Slot : uint8_t {
     DlyPingPong,
     DlyDecimate,
     DlyBeatRepeat,
+    DlyTapeStop,
 
     // Feedback
     FbkAmount,
     FbkFilterLoop,
     FbkRecircFm,
+    FbkClockBurst,
 
     // Mixer
     MixWet,

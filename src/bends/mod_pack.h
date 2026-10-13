@@ -38,8 +38,10 @@ struct DelayMods {
     float decimate{0.0f};
     float ping_pong{0.0f};
     float beat_repeat{0.0f};
+    float tape_stop{0.0f};
     float fbk_filter_loop{0.0f};
     float fbk_recirc_fm{0.0f};
+    float fbk_clock_burst{0.0f};
 };
 
 struct MixerMods {
@@ -94,9 +96,11 @@ struct BoardMods {
             case Slot::DlyDecimate:    delay.decimate += eff; break;
             case Slot::DlyPingPong:    delay.ping_pong = std::max(delay.ping_pong, eff); break;
             case Slot::DlyBeatRepeat:  delay.beat_repeat = std::max(delay.beat_repeat, eff); break;
+            case Slot::DlyTapeStop:    delay.tape_stop = std::max(delay.tape_stop, eff); break;
 
             case Slot::FbkFilterLoop:  delay.fbk_filter_loop = std::max(delay.fbk_filter_loop, eff); break;
             case Slot::FbkRecircFm:    delay.fbk_recirc_fm += eff; break;
+            case Slot::FbkClockBurst:  delay.fbk_clock_burst += eff; break;
 
             case Slot::MixFilterIsol:  mixer.filter_isolate = std::max(mixer.filter_isolate, eff); break;
             case Slot::MixDiffuser:    mixer.diffuser = std::max(mixer.diffuser, eff); break;

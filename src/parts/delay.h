@@ -60,6 +60,9 @@ public:
         _target_samples = 28.0f;
         _clk_fader_speed = 1.0f;
         _clk_fm_slow = 0.0f;
+        _tape_braking = false;
+        _tape_brake_speed = 1.0f;
+        _tape_brake_offset = 28.0f;
     }
 
     inline void ServiceIncrementalClear(size_t chunk_size = 4096) {
@@ -170,18 +173,26 @@ public:
             _smooth_delay_samples = _head_a_samples * (1.0f - _xfade_progress) + _head_b_samples * _xfade_progress;
         }
 
-        // Freeze & Instant Beat-Repeat Micro-Looper handling
+        // Freeze & Pressure-Sensitive Beat-Repeat Micro-Looper handling
         bool eff_frozen = is_frozen || (mods.beat_repeat > 0.05f);
         if (eff_frozen) {
+            float target_freeze_len = _smooth_delay_samples;
+            if (mods.beat_repeat > 0.05f) {
+                if (mods.beat_repeat > 0.80f) {
+                    target_freeze_len = 960.0f;  // ~20ms machine-gun roll
+                } else if (mods.beat_repeat > 0.50f) {
+                    target_freeze_len = 2400.0f; // ~50ms 1/16th roll
+                } else {
+                    target_freeze_len = 5760.0f; // ~120ms 1/8th beat roll
+                }
+            }
             if (!_was_frozen) {
                 _was_frozen = true;
-                float initial_len = (mods.beat_repeat > 0.05f) ? 5760.0f : _smooth_delay_samples;
-                _freeze_len = std::clamp(initial_len, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
+                _freeze_len = std::clamp(target_freeze_len, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
                 _freeze_phase = 0.0f;
             }
-            float target_freeze_len = (mods.beat_repeat > 0.05f) ? 5760.0f : _smooth_delay_samples;
             target_freeze_len = std::clamp(target_freeze_len, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
-            _freeze_len += 0.008f * (target_freeze_len - _freeze_len);
+            _freeze_len += 0.025f * (target_freeze_len - _freeze_len);
 
             if (_freeze_len > 1.0f) {
                 _freeze_phase += eff_clk_speed;
@@ -196,6 +207,28 @@ public:
         }
 
         float base_read_samples = eff_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
+
+        // Tape Motor Brake (Bend: P06 DLY <-> P05 GND)
+        if (mods.tape_stop > 0.05f) {
+            if (!_tape_braking) {
+                _tape_braking = true;
+                _tape_brake_speed = 1.0f;
+                _tape_brake_offset = base_read_samples;
+            }
+            float decel = 0.00015f + mods.tape_stop * 0.00030f;
+            _tape_brake_speed = std::max(0.0f, _tape_brake_speed - decel);
+            _tape_brake_offset += (1.0f - _tape_brake_speed);
+            _tape_brake_offset = std::clamp(_tape_brake_offset, 28.0f, static_cast<float>(_buffer.MaxSize() - 100));
+            base_read_samples = _tape_brake_offset;
+        } else if (_tape_braking) {
+            _tape_brake_speed += 0.0005f * (1.0f - _tape_brake_speed);
+            _tape_brake_offset += (1.0f - _tape_brake_speed);
+            _tape_brake_offset = std::clamp(_tape_brake_offset, 28.0f, static_cast<float>(_buffer.MaxSize() - 100));
+            base_read_samples = _tape_brake_offset;
+            if (_tape_brake_speed >= 0.99f) {
+                _tape_braking = false;
+            }
+        }
 
         // Dynamic Length & Quality scaled modulation from OSC <-> CLK bend
         // - Short length (< 2400 samples, Karplus-Strong string):
@@ -424,8 +457,13 @@ public:
         float ping_pong_cross = 0.32f + mods.ping_pong;
         float cross = std::clamp(ping_pong_cross, 0.0f, 1.0f);
         float direct = 1.0f - cross;
-        float fb_tot_l = (_damp_l * direct + _damp_r * cross) * eff_fb * shunt_fbk * fb_xfade_duck;
-        float fb_tot_r = (_damp_r * direct + _damp_l * cross) * eff_fb * shunt_fbk * fb_xfade_duck;
+
+        // Rhythmic dub feedback burst on clock beat (Bend: P00 CLK <-> P02 FBK)
+        float clock_burst_fb = (mods.fbk_clock_burst > 0.01f) ? (clk_phase < 0.22f ? mods.fbk_clock_burst * 0.65f : 0.0f) : 0.0f;
+        float total_fb = (eff_fb + clock_burst_fb) * shunt_fbk * fb_xfade_duck;
+
+        float fb_tot_l = (_damp_l * direct + _damp_r * cross) * total_fb;
+        float fb_tot_r = (_damp_r * direct + _damp_l * cross) * total_fb;
 
         // SDRAM buffer write (inhibited during freeze or deep glitch)
         bool write_inhibited = eff_frozen || (glitch_intensity > 0.15f) || (eff_xor > 0.60f);
@@ -480,6 +518,10 @@ private:
     float _freeze_len{48000.0f};
     float _freeze_phase{0.0f};
     float _clk_fm_slow{0.0f};
+
+    bool  _tape_braking{false};
+    float _tape_brake_speed{1.0f};
+    float _tape_brake_offset{28.0f};
 };
 
 } // namespace bends
