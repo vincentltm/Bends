@@ -62,11 +62,13 @@ public:
 
         float bias_drift = 0.18f * (starve * starve) + mods.bias;
         float deadzone = 0.07f * (starve * starve);
+        float sputter_th = (starve > 0.40f) ? ((starve - 0.40f) * 0.15f) : 0.0f;
         float touch_drive = touch_amp * 3.0f;
 
         float target_drive = (0.35f + 7.2f * _in_vol + touch_drive + mods.drive) * (1.0f + 1.4f * starve);
         _drive += 0.025f * (target_drive - _drive);
-        float bias_null = FastTanh(bias_drift * _drive);
+        float drive_eff = _drive * (1.0f + 0.8f * starve);
+        float bias_null = FastTanh(bias_drift * drive_eff);
 
         // Musical loudness compensation: prevents volume collapse when pushed or starved
         float comp = 1.0f / (1.0f + 0.10f * std::max(0.0f, _drive - 1.0f));
@@ -97,12 +99,22 @@ public:
             float amp_in = amp_core + osc_in + hum_inject * _in_vol + pluck_sig + mb_sig;
             float biased_in = amp_in + bias_drift;
             float gated_in = biased_in;
-            if (std::abs(biased_in) < deadzone) {
+            if (sputter_th > 0.001f && std::abs(amp_in) < sputter_th) {
+                // Tier 2 Velcro tearing sputter: rapid non-linear attenuation below threshold
+                float ratio = std::abs(amp_in) / sputter_th;
+                gated_in = biased_in * (ratio * ratio * ratio);
+            } else if (std::abs(biased_in) < deadzone) {
                 float sgn = (biased_in >= 0.0f) ? 1.0f : -1.0f;
                 float mag = std::abs(biased_in);
                 gated_in = sgn * (mag * mag) / std::max(0.001f, deadzone);
             }
-            float clipped = FastTanh(gated_in * _drive);
+            // Asymmetric fuzz under starve: positive peak soft saturation, negative hard clipping
+            float clipped;
+            if (gated_in >= 0.0f) {
+                clipped = FastTanh(gated_in * drive_eff);
+            } else {
+                clipped = FastTanh(gated_in * drive_eff * (1.0f + 1.8f * starve));
+            }
             float out = (clipped - bias_null) * out_gain;
             return dc_block.Process(out);
         };

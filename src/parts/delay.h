@@ -102,8 +102,7 @@ public:
                         float string_damp, float eff_fb,
                         float v_rail_eff, float starve, float shunt_dly, float shunt_fbk,
                         float& out_l, float& out_r) {
-        float clk_rail_sag = 0.50f + 0.50f * (v_rail_eff * v_rail_eff);
-        float eff_clk_speed = (_clk_fader_speed * (1.0f + mods.overclock) - mods.decimate) * clk_rail_sag;
+        float eff_clk_speed = _clk_fader_speed * (1.0f + mods.overclock) - mods.decimate;
         eff_clk_speed = std::clamp(eff_clk_speed, 0.05f, 1.45f);
 
         if (!_delay_time_initialized) {
@@ -171,14 +170,17 @@ public:
             _smooth_delay_samples = _head_a_samples * (1.0f - _xfade_progress) + _head_b_samples * _xfade_progress;
         }
 
-        // Freeze handling
-        if (is_frozen) {
+        // Freeze & Instant Beat-Repeat Micro-Looper handling
+        bool eff_frozen = is_frozen || (mods.beat_repeat > 0.05f);
+        if (eff_frozen) {
             if (!_was_frozen) {
                 _was_frozen = true;
-                _freeze_len = std::clamp(_smooth_delay_samples, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
+                float initial_len = (mods.beat_repeat > 0.05f) ? 5760.0f : _smooth_delay_samples;
+                _freeze_len = std::clamp(initial_len, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
                 _freeze_phase = 0.0f;
             }
-            float target_freeze_len = std::clamp(_smooth_delay_samples, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            float target_freeze_len = (mods.beat_repeat > 0.05f) ? 5760.0f : _smooth_delay_samples;
+            target_freeze_len = std::clamp(target_freeze_len, 28.0f, static_cast<float>(_buffer.MaxSize() - 2));
             _freeze_len += 0.008f * (target_freeze_len - _freeze_len);
 
             if (_freeze_len > 1.0f) {
@@ -193,7 +195,7 @@ public:
             _was_frozen = false;
         }
 
-        float base_read_samples = is_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
+        float base_read_samples = eff_frozen ? (_freeze_len - _freeze_phase) : _smooth_delay_samples;
 
         // Dynamic Length & Quality scaled modulation from OSC <-> CLK bend
         // - Short length (< 2400 samples, Karplus-Strong string):
@@ -225,8 +227,11 @@ public:
             _clk_fm_slow *= 0.998f;
         }
 
-        float mod_l = mods.time_mod + clk_fm_time_mod_l;
-        float mod_r = -mods.time_mod + clk_fm_time_mod_r;
+        // Tier 2: Subtle memory address flutter under starved power rail (0.70 -> 0.45)
+        float starve_flutter = (starve > 0.30f) ? (FastSin(static_cast<float>(_lfsr) * 0.005f) * (starve - 0.30f) * 4.0f) : 0.0f;
+
+        float mod_l = mods.time_mod + clk_fm_time_mod_l + starve_flutter;
+        float mod_r = -mods.time_mod + clk_fm_time_mod_r - starve_flutter;
 
         // Rhythmic glitch stutter (< 35 Hz)
         if (mods.stutter > 0.015f && clk_is_slow) {
@@ -253,7 +258,7 @@ public:
 
         // Read delay buffer (Equal-Power Dual-Head or Direct)
         float raw_l, raw_r;
-        if (is_frozen) {
+        if (eff_frozen) {
             float pos_l = std::clamp(base_read_samples + mod_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
             float pos_r = std::clamp(base_read_samples + mod_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
             raw_l = _buffer.ReadL(pos_l);
@@ -285,9 +290,8 @@ public:
         float read_pos_l = base_read_samples + mod_l;
         float read_pos_r = base_read_samples + mod_r;
 
-        // Address bus slip & CD skips: low clock quality + clock FM induces digital buffer stutter & CD skips
-        // Engaged strictly when Left Fader S36 is in lower range (< 0.38) or voltage rail is starved (< 0.35)
-        float starve_slip = (v_rail_eff < 0.35f) ? ((0.35f - v_rail_eff) / 0.30f) : 0.0f;
+        // Tier 3: Hardware address bus slip & CD skips: low clock quality + clock FM + starved voltage
+        float starve_slip = (v_rail_eff < 0.45f) ? ((0.45f - v_rail_eff) / 0.25f) : 0.0f;
         float clk_quality_drop = (_clk_fader_speed < 0.38f) ? ((0.38f - _clk_fader_speed) / 0.25f) : 0.0f;
         float clk_fm_glitch = std::abs(clk_fm) * clk_quality_drop * 1.0f;
         float glitch_intensity = std::max(mods.address_slip, std::max(starve_slip, clk_fm_glitch));
@@ -328,13 +332,15 @@ public:
             raw_r = raw_r * (1.0f - g_blend) + slipped_r * g_blend;
         }
 
-        // Bitwise XOR memory address scrambling bend
-        if (mods.xor_glitch > 0.015f) {
+        // Bitwise XOR memory address scrambling (Bend or deep starvation < 0.30)
+        float auto_xor = (v_rail_eff < 0.30f) ? ((0.30f - v_rail_eff) * 1.5f) : 0.0f;
+        float eff_xor = std::max(mods.xor_glitch, auto_xor);
+        if (eff_xor > 0.015f) {
             uint32_t mask = 0;
-            if (mods.xor_glitch > 0.05f) mask |= 0x003F; // micro byte fragments
-            if (mods.xor_glitch > 0.25f) mask |= 0x03C0; // mid address line scramble
-            if (mods.xor_glitch > 0.55f) mask |= 0x1E00; // macro address bus short
-            if (mods.xor_glitch > 0.85f) mask |= 0x6000; // wild ring bank short
+            if (eff_xor > 0.05f) mask |= 0x003F; // micro byte fragments
+            if (eff_xor > 0.25f) mask |= 0x03C0; // mid address line scramble
+            if (eff_xor > 0.55f) mask |= 0x1E00; // macro address bus short
+            if (eff_xor > 0.85f) mask |= 0x6000; // wild ring bank short
 
             uint32_t offset_l = static_cast<uint32_t>(read_pos_l) ^ mask;
             uint32_t offset_r = static_cast<uint32_t>(read_pos_r) ^ (mask << 1);
@@ -344,7 +350,7 @@ public:
             float xor_l = _buffer.ReadL(xor_read_l);
             float xor_r = _buffer.ReadR(xor_read_r);
 
-            float blend = std::min(1.0f, mods.xor_glitch * 1.4f);
+            float blend = std::min(1.0f, eff_xor * 1.4f);
             raw_l = raw_l * (1.0f - blend) + xor_l * blend;
             raw_r = raw_r * (1.0f - blend) + xor_r * blend;
         }
@@ -403,10 +409,10 @@ public:
             float proc_l = _lofi_l.Process(_damp_l);
             float proc_r = _lofi_r.Process(_damp_r);
 
-            float bit_depth = std::clamp(16.0f - starve * 8.0f - (1.0f - eff_clk_speed) * 6.0f, 8.0f, 16.0f);
+            float bit_depth = std::clamp(16.0f - starve * 9.0f - (1.0f - eff_clk_speed) * 6.0f, 6.0f, 16.0f);
             float levels = FastPow2(bit_depth);
             float inv_levels = 1.0f / levels;
-            float dac_dnl = 0.05f + starve * 0.35f + (1.0f - eff_clk_speed) * 0.15f;
+            float dac_dnl = 0.05f + starve * 0.40f + (1.0f - eff_clk_speed) * 0.15f;
 
             out_dac_l = QuantizeDac(proc_l, levels, inv_levels, dac_dnl) * shunt_dly;
             out_dac_r = QuantizeDac(proc_r, levels, inv_levels, dac_dnl) * shunt_dly;
@@ -422,12 +428,12 @@ public:
         float fb_tot_r = (_damp_r * direct + _damp_l * cross) * eff_fb * shunt_fbk * fb_xfade_duck;
 
         // SDRAM buffer write (inhibited during freeze or deep glitch)
-        bool write_inhibited = is_frozen || (glitch_intensity > 0.15f) || (mods.xor_glitch > 0.60f);
+        bool write_inhibited = eff_frozen || (glitch_intensity > 0.15f) || (eff_xor > 0.60f);
         if (!write_inhibited) {
             float dly_in_l = _dc_block_l.Process(in_l + FastTanh(fb_tot_l));
             float dly_in_r = _dc_block_r.Process(in_r + FastTanh(fb_tot_r));
             _buffer.Write(dly_in_l, dly_in_r, eff_clk_speed);
-        } else if (!is_frozen) {
+        } else if (!eff_frozen) {
             _buffer.Advance(eff_clk_speed);
         }
 

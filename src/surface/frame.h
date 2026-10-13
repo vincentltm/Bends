@@ -11,16 +11,16 @@ struct ControlFrame {
     float pressures[12]{0.0f};
     float proximities[12]{0.0f};
 
-    // Knobs & Faders
-    float s30_amp{0.35f};  // S30 Pot: Preamp Drive
-    float s31_osc{0.25f};  // S31 Pot: Oscillator Pitch
-    float s32_flt{0.65f};  // S32 Pot: Filter Cutoff
-    float s33_dly{0.50f};  // S33 Pot: Delay Time
-    float s34_fbk{0.40f};  // S34 Pot: Delay Feedback
-    float s35_mix{0.50f};  // S35 Pot: Master Wet/Dry
+    // Knobs & Faders (PCB Silkscreen 1:1)
+    float s30_amp{0.35f};  // S30 Pot: Preamp Drive (Pad 08 AMP)
+    float s31_flt{0.65f};  // S31 Pot: Filter Cutoff (Pad 04 FLT)
+    float s32_clk{0.15f};  // S32 Pot: Master Delay Clock (Pad 00 CLK)
+    float s33_dly{0.50f};  // S33 Pot: Delay Time (Pad 06 DLY)
+    float s34_fbk{0.40f};  // S34 Pot: Delay Feedback (Pad 02 FBK)
+    float s35_mix{0.50f};  // S35 Pot: Master Wet/Dry (Pad 09 MIX)
 
-    float s36_clk{0.15f};  // S36 Left Fader: Master Clock
-    float s37_vcc{1.00f};  // S37 Right Fader: Power Rail
+    float s36_osc{0.25f};  // S36 Left Fader: Probe Oscillator Pitch (Pad 03 OSC)
+    float s37_vcc{1.00f};  // S37 Right Fader: Power Rail / Starve (Pad 07 VCC)
 
     // Hardware Switches
     uint8_t osc_mode{1};   // 0 = Sin, 1 = Saw, 2 = Rnd

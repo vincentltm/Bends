@@ -31,6 +31,7 @@ enum class Slot : uint8_t {
     DlyXorGlitch,
     DlyPingPong,
     DlyDecimate,
+    DlyBeatRepeat,
 
     // Feedback
     FbkAmount,
@@ -47,6 +48,11 @@ enum class Slot : uint8_t {
     OscFreqMod,
     OscSubOctave,
 
+    // Clock
+    ClkRateMod,
+    ClkSync,
+    ClkSubDiv,
+
     Count
 };
 
@@ -61,7 +67,8 @@ enum class Sig : uint8_t {
     FltOut,          // SVF lowpass output audio
     DlyOut,          // Delay wet output audio
     Hum,             // 50Hz mains hum / crackle
-    ContactMic       // Contact mic tap/rub audio
+    ContactMic,      // Contact mic tap/rub audio
+    MasterOut        // Final master mixed output audio
 };
 
 enum class Verb : uint8_t {

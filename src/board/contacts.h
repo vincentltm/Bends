@@ -23,6 +23,7 @@ public:
 
     void Reset() {
         _prev_is_latched = false;
+        _unlatch_timer = 0;
         _num_active_bridges = 0;
         _total_current_load = 0.0f;
 
@@ -43,12 +44,16 @@ public:
         float sum_g = 0.0f;
 
         bool is_latched = frame.is_latched;
+        bool latch_just_engaged = (is_latched && !_prev_is_latched);
         bool latch_just_disengaged = (!is_latched && _prev_is_latched);
         _prev_is_latched = is_latched;
 
-        // Instant unlatch on live return
         if (latch_just_disengaged) {
-            ClearLatched();
+            _unlatch_timer = 260; // ~350 ms grace period at 750 Hz
+        } else if (!is_latched && _unlatch_timer > 0) {
+            if (--_unlatch_timer == 0) {
+                ClearLatched();
+            }
         }
 
         // 1. Calculate live physical bridges between pairs touched simultaneously
@@ -66,11 +71,12 @@ public:
             }
         }
 
-        // 2. Latch engagement: continuously capture peak live bridges and pressures while latched
-        if (is_latched) {
+        // 2. Latch engagement edge: snapshot current live bridges
+        if (latch_just_engaged) {
+            _unlatch_timer = 0;
             for (size_t i = 0; i < kPhysicalNodes; ++i) {
                 if (frame.pressures[i] > 0.02f) {
-                    _latched_pressures[i] = std::max(_latched_pressures[i], frame.pressures[i]);
+                    _latched_pressures[i] = frame.pressures[i];
                 }
                 for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                     if (live_g[i][j] > 0.015f) {
@@ -88,7 +94,7 @@ public:
             for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                 float total_g = live_g[i][j];
                 if (is_latched) {
-                    total_g = std::max(total_g, _latched_conductance[i][j]);
+                    total_g += _latched_conductance[i][j];
                 }
                 total_g = std::min(1.0f, total_g);
                 _conductance[i][j] = total_g;
@@ -162,7 +168,6 @@ public:
 
     bool HasLatchedBridges() const {
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
-            if (_latched_pressures[i] > 0.02f) return true;
             for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                 if (_latched_conductance[i][j] > 0.015f) return true;
             }
@@ -182,6 +187,7 @@ private:
     float        _total_current_load{0.0f};
 
     bool     _prev_is_latched{false};
+    uint32_t _unlatch_timer{0};
 };
 
 } // namespace bends

@@ -37,6 +37,7 @@ struct DelayMods {
     float xor_glitch{0.0f};
     float decimate{0.0f};
     float ping_pong{0.0f};
+    float beat_repeat{0.0f};
     float fbk_filter_loop{0.0f};
     float fbk_recirc_fm{0.0f};
 };
@@ -46,12 +47,19 @@ struct MixerMods {
     float diffuser{0.0f};
 };
 
+struct ClockMods {
+    float rate_mod{0.0f};
+    float sub_div{0.0f};
+    bool  sync{false};
+};
+
 struct BoardMods {
     PreampMods     preamp;
     FilterMods     filter;
     DelayMods      delay;
     MixerMods      mixer;
     OscillatorMods osc;
+    ClockMods      clock;
 
     void Reset() {
         preamp = PreampMods{};
@@ -59,6 +67,7 @@ struct BoardMods {
         delay  = DelayMods{};
         mixer  = MixerMods{};
         osc    = OscillatorMods{};
+        clock  = ClockMods{};
     }
 
     inline void Apply(Slot slot, Verb verb, float amount, float src_val) {
@@ -84,6 +93,7 @@ struct BoardMods {
             case Slot::DlyXorGlitch:   delay.xor_glitch = std::max(delay.xor_glitch, eff); break;
             case Slot::DlyDecimate:    delay.decimate += eff; break;
             case Slot::DlyPingPong:    delay.ping_pong = std::max(delay.ping_pong, eff); break;
+            case Slot::DlyBeatRepeat:  delay.beat_repeat = std::max(delay.beat_repeat, eff); break;
 
             case Slot::FbkFilterLoop:  delay.fbk_filter_loop = std::max(delay.fbk_filter_loop, eff); break;
             case Slot::FbkRecircFm:    delay.fbk_recirc_fm += eff; break;
@@ -94,6 +104,10 @@ struct BoardMods {
             case Slot::OscPhase:       if (eff > 0.5f) osc.sync = true; break;
             case Slot::OscFreqMod:     osc.freq_mod += eff; break;
             case Slot::OscSubOctave:   osc.sub_octave = std::max(osc.sub_octave, eff); break;
+
+            case Slot::ClkRateMod:     clock.rate_mod += eff; break;
+            case Slot::ClkSubDiv:      clock.sub_div = std::max(clock.sub_div, eff); break;
+            case Slot::ClkSync:        if (eff > 0.5f) clock.sync = true; break;
             default: break;
         }
     }

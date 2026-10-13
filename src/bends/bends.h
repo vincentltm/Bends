@@ -19,11 +19,16 @@ constexpr Bend kBends[] = {
     // CLK <-> OSC: Clock divider triggers sub-octave flip-flop
     { NodeClk, NodeOsc, Verb::Set,      Slot::OscSubOctave,  Sig::One,       0.85f, When::ClkSlow },
 
+    // CLK <-> GND: Half-time / triplet clock breakdown (Bend 3)
+    { NodeClk, NodeGnd, Verb::Set,      Slot::ClkSubDiv,     Sig::One,       0.50f, When::Always },
+
     // -------------------------------------------------------------
     // P01 (RST) Bends
     // -------------------------------------------------------------
     // RST <-> GND: Hardware memory flush & feedback dump
     { NodeRst, NodeGnd, Verb::Flush,    Slot::None,          Sig::One,       1.00f, When::Always },
+    // RST <-> FBK: Instant beat-repeat / micro-looper freeze (Bend 4)
+    { NodeRst, NodeFbk, Verb::Set,      Slot::DlyBeatRepeat, Sig::One,       1.00f, When::Always },
     // RST <-> DLY: 90° quadrature reverse pitch cloud
     { NodeRst, NodeDly, Verb::Set,      Slot::DlyReverse,    Sig::One,       1.00f, When::Always },
     // RST <-> OSC: Hard phase sync
@@ -59,16 +64,23 @@ constexpr Bend kBends[] = {
     { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::Osc,       1.20f, When::Rnd },
     // OSC <-> DLY: Quadrature chorus/FM (Sin) or ramp barberpole (Saw)
     { NodeOsc, NodeDly, Verb::Modulate, Slot::DlyTimeMod,    Sig::Osc,       8.00f, When::Sin },
+    // OSC <-> CLK: Rhythmic rate modulation & accelerando ratcheting
+    { NodeOsc, NodeClk, Verb::Modulate, Slot::ClkRateMod,    Sig::Osc,       2.20f, When::Always },
+    { NodeOsc, NodeClk, Verb::Trigger,  Slot::ClkSync,       Sig::OscReset,  1.00f, When::Saw },
     // OSC <-> CLK: Dynamic audio-rate FM on delay converter clock & timeheads
     { NodeOsc, NodeClk, Verb::Modulate, Slot::DlyClockFm,    Sig::Osc,       0.55f, When::Always },
     // OSC <-> FBK: Chaotic delayed self-FM cross-modulation
     { NodeOsc, NodeFbk, Verb::Modulate, Slot::FbkRecircFm,   Sig::Osc,       0.95f, When::Always },
+    // OSC <-> OUT: Chaotic Bifurcation FM (Bend 7)
+    { NodeOsc, NodeOut, Verb::Modulate, Slot::OscFreqMod,    Sig::MasterOut, 1.80f, When::Always },
 
     // -------------------------------------------------------------
     // P04 (FLT) Bends
     // -------------------------------------------------------------
     // FLT <-> FBK: Dub delay loop (routing delay feedback through resonant filter)
     { NodeFlt, NodeFbk, Verb::Set,      Slot::FbkFilterLoop, Sig::One,       1.00f, When::Always },
+    // FLT <-> DLY: Vocal Formant Modulation / "Singing Delay" (Bend 5)
+    { NodeFlt, NodeDly, Verb::Modulate, Slot::DlyTimeMod,    Sig::FltOut,    3.50f, When::Always },
     // FLT <-> MIX: Master output filter isolator
     { NodeFlt, NodeMix, Verb::Set,      Slot::MixFilterIsol, Sig::One,       1.00f, When::Always },
 

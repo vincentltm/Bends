@@ -100,6 +100,7 @@ public:
                 case Sig::DlyOut:     src_val = prev_node_sig[NodeDly][0]; break;
                 case Sig::Hum:        src_val = prev_node_sig[NodeGnd][0]; break;
                 case Sig::ContactMic: src_val = prev_node_sig[NodeIn][0]; break;
+                case Sig::MasterOut:  src_val = prev_node_sig[NodeOut][0]; break;
             }
             mods.Apply(rt.target, rt.verb, rt.gain, src_val);
         }
