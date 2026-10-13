@@ -33,6 +33,7 @@ enum class Slot : uint8_t {
     DlyDecimate,
     DlyBeatRepeat,
     DlyTapeStop,
+    DlyTapeWarpLoop,
 
     // Feedback
     FbkAmount,

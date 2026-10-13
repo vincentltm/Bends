@@ -24,16 +24,18 @@ constexpr Bend kBends[] = {
     { NodeClk, NodeFbk, Verb::Modulate, Slot::FbkClockBurst, Sig::ClkPulse,  0.85f, When::Always },
 
     // -------------------------------------------------------------
-    // P01 (RST) Utility
+    // P01 (RST) Utility & Performance Bends
     // -------------------------------------------------------------
     // RST <-> GND: Hardware memory flush & feedback dump (Panic Clear)
-    { NodeRst, NodeGnd, Verb::Flush,    Slot::None,          Sig::One,       1.00f, When::Always },
+    { NodeRst, NodeGnd, Verb::Flush,    Slot::None,            Sig::One,       1.00f, When::Always },
+    // RST <-> DLY: 90° Quadrature Stereo Reverse Pitch Cloud ("Sparkly Stuff")
+    { NodeRst, NodeDly, Verb::Set,      Slot::DlyReverse,      Sig::One,       1.00f, When::Always },
 
     // -------------------------------------------------------------
     // P07 (VCC) Bends
     // -------------------------------------------------------------
-    // VCC <-> DLY: Power-of-two address bus jump & CD skip
-    { NodeVcc, NodeDly, Verb::Set,      Slot::DlyAddressSlip,Sig::One,       1.00f, When::Always },
+    // VCC <-> DLY: Overvoltage Tape Drag & Saturated Sound-on-Sound Loop Print
+    { NodeVcc, NodeDly, Verb::Set,      Slot::DlyTapeWarpLoop, Sig::One,       1.00f, When::Always },
     // VCC <-> CLK: Overclock speed boost
     { NodeVcc, NodeClk, Verb::Modulate, Slot::DlyOverclock,  Sig::One,       0.35f, When::Always },
     // VCC <-> FBK: Power bus XOR memory address line scrambling

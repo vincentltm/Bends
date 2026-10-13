@@ -63,6 +63,8 @@ public:
         _tape_braking = false;
         _tape_brake_speed = 1.0f;
         _tape_brake_offset = 28.0f;
+        _warp_drag = 0.0f;
+        _warp_flutter_phase = 0.0f;
     }
 
     inline void ServiceIncrementalClear(size_t chunk_size = 4096) {
@@ -106,7 +108,22 @@ public:
                         float v_rail_eff, float starve, float shunt_dly, float shunt_fbk,
                         float& out_l, float& out_r) {
         float eff_clk_speed = _clk_fader_speed * (1.0f + mods.overclock) - mods.decimate;
-        eff_clk_speed = std::clamp(eff_clk_speed, 0.05f, 1.45f);
+
+        // Overvoltage Tape Drag & Saturated Loop Print (Bend: P07 VCC <-> P06 DLY)
+        float warp_amt = std::clamp(mods.tape_warp_loop, 0.0f, 1.0f);
+        if (warp_amt > 0.005f) {
+            // Mechanical capstan drag: slows virtual tape speed down with smooth flywheel inertia
+            float target_drag = warp_amt * 0.35f;
+            _warp_drag += 0.004f * (target_drag - _warp_drag);
+
+            // 4.8 Hz authentic analog tape wow & flutter
+            _warp_flutter_phase += 4.8f * kTwoPi / _sample_rate;
+            if (_warp_flutter_phase >= kTwoPi) _warp_flutter_phase -= kTwoPi;
+        } else {
+            // Flywheel revs back up to full speed on release
+            _warp_drag += 0.003f * (0.0f - _warp_drag);
+        }
+        eff_clk_speed = std::clamp(eff_clk_speed * (1.0f - _warp_drag), 0.05f, 1.45f);
 
         if (!_delay_time_initialized) {
             _head_a_samples = _target_samples;
@@ -263,8 +280,9 @@ public:
         // Tier 2: Subtle memory address flutter under starved power rail (0.70 -> 0.45)
         float starve_flutter = (starve > 0.30f) ? (FastSin(static_cast<float>(_lfsr) * 0.005f) * (starve - 0.30f) * 4.0f) : 0.0f;
 
-        float mod_l = mods.time_mod + clk_fm_time_mod_l + starve_flutter;
-        float mod_r = -mods.time_mod + clk_fm_time_mod_r - starve_flutter;
+        float flutter = (warp_amt > 0.005f) ? (FastSin(_warp_flutter_phase) * (24.0f * warp_amt)) : 0.0f;
+        float mod_l = mods.time_mod + clk_fm_time_mod_l + starve_flutter + flutter;
+        float mod_r = -mods.time_mod + clk_fm_time_mod_r - starve_flutter + flutter * 0.85f;
 
         // Rhythmic glitch stutter (< 35 Hz)
         if (mods.stutter > 0.015f && clk_is_slow) {
@@ -462,14 +480,26 @@ public:
         float clock_burst_fb = (mods.fbk_clock_burst > 0.01f) ? (clk_phase < 0.22f ? mods.fbk_clock_burst * 0.65f : 0.0f) : 0.0f;
         float total_fb = (eff_fb + clock_burst_fb) * shunt_fbk * fb_xfade_duck;
 
+        // Overvoltage Sound-on-Sound Looper (VCC <-> DLY):
+        // Holds loop infinitely (>= 1.0) while bend is active so old audio never dies,
+        // and drives feedback into warm tape saturation that gets written to the buffer
+        if (warp_amt > 0.005f) {
+            total_fb = std::max(total_fb, 0.998f + 0.08f * warp_amt);
+        }
+
         float fb_tot_l = (_damp_l * direct + _damp_r * cross) * total_fb;
         float fb_tot_r = (_damp_r * direct + _damp_l * cross) * total_fb;
 
         // SDRAM buffer write (inhibited during freeze or deep glitch)
         bool write_inhibited = eff_frozen || (glitch_intensity > 0.15f) || (eff_xor > 0.60f);
         if (!write_inhibited) {
-            float dly_in_l = _dc_block_l.Process(in_l + FastTanh(fb_tot_l));
-            float dly_in_r = _dc_block_r.Process(in_r + FastTanh(fb_tot_r));
+            float fb_drive = 1.0f + 2.4f * warp_amt;
+            // Warm tape saturation: dynamically soft-clips and normalizes to prevent volume runaway
+            float sat_fb_l = FastTanh(fb_tot_l * fb_drive) * (1.0f / std::sqrt(1.0f + 0.6f * warp_amt));
+            float sat_fb_r = FastTanh(fb_tot_r * fb_drive) * (1.0f / std::sqrt(1.0f + 0.6f * warp_amt));
+
+            float dly_in_l = _dc_block_l.Process(in_l + sat_fb_l);
+            float dly_in_r = _dc_block_r.Process(in_r + sat_fb_r);
             _buffer.Write(dly_in_l, dly_in_r, eff_clk_speed);
         } else if (!eff_frozen) {
             _buffer.Advance(eff_clk_speed);
@@ -522,6 +552,9 @@ private:
     bool  _tape_braking{false};
     float _tape_brake_speed{1.0f};
     float _tape_brake_offset{28.0f};
+
+    float _warp_drag{0.0f};
+    float _warp_flutter_phase{0.0f};
 };
 
 } // namespace bends
