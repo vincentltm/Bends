@@ -75,11 +75,11 @@ struct PadGestureTracker {
                 onset_max_p = p;
             }
 
-            if (onset_max_p > 0.12f && onset_peak_dp > 0.06f) {
-                float vel = onset_peak_dp * 2.8f + (onset_max_p - 0.12f) * 1.2f;
-                out_tap_vel = std::clamp(vel, 0.15f, 1.0f);
+            if (onset_max_p > 0.08f && onset_peak_dp > 0.035f) {
+                float vel = onset_peak_dp * 3.2f + (onset_max_p - 0.08f) * 1.4f;
+                out_tap_vel = std::clamp(vel, 0.20f, 1.0f);
                 state = Held;
-                lockout_scans = 25; // ~75ms lockout suppresses scratch during tap rebound
+                lockout_scans = 16; // ~50ms lockout suppresses scratch during tap rebound
                 rub_speed = 0.0f;
             } else if (onset_scans >= 3) {
                 // Soft touchdown: settle so scratching begins immediately

@@ -23,6 +23,8 @@ public:
 
     void Reset() {
         _prev_is_latched = false;
+        _has_latched_snapshot = false;
+        _was_touching_first_bend = false;
         _unlatch_timer = 0;
         _num_active_bridges = 0;
         _total_current_load = 0.0f;
@@ -44,22 +46,18 @@ public:
         float sum_g = 0.0f;
 
         bool is_latched = frame.is_latched;
-        bool latch_just_engaged = (is_latched && !_prev_is_latched);
-        bool latch_just_disengaged = (!is_latched && _prev_is_latched);
         _prev_is_latched = is_latched;
 
-        if (latch_just_disengaged) {
-            _unlatch_timer = 260; // ~350 ms grace period at 750 Hz
-        } else if (!is_latched && _unlatch_timer > 0) {
-            if (--_unlatch_timer == 0) {
-                ClearLatched();
-            }
+        if (!is_latched) {
+            ClearLatched();
         }
 
         // 1. Calculate live physical bridges between pairs touched simultaneously
         float live_g[kPhysicalNodes][kPhysicalNodes] = {{0.0f}};
+        bool any_live_touch = false;
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
             float pi = frame.pressures[i];
+            if (pi > 0.02f) any_live_touch = true;
             for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                 float pj = frame.pressures[j];
                 if (pi > 0.02f && pj > 0.02f) {
@@ -71,19 +69,27 @@ public:
             }
         }
 
-        // 2. Latch engagement edge: snapshot current live bridges
-        if (latch_just_engaged) {
-            _unlatch_timer = 0;
-            for (size_t i = 0; i < kPhysicalNodes; ++i) {
-                if (frame.pressures[i] > 0.02f) {
-                    _latched_pressures[i] = frame.pressures[i];
-                }
-                for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
-                    if (live_g[i][j] > 0.015f) {
-                        _latched_conductance[i][j] = std::max(_latched_conductance[i][j], live_g[i][j]);
-                        _latched_conductance[j][i] = _latched_conductance[i][j];
+        // 2. Latch snapshot management:
+        // While latched and snapshot is not yet locked:
+        // Capture peak pressures and conductances continuously as long as user is touching pads.
+        // Once user lifts their fingers, snapshot locks permanently so subsequent touches are purely momentary!
+        if (is_latched && !_has_latched_snapshot) {
+            if (any_live_touch) {
+                for (size_t i = 0; i < kPhysicalNodes; ++i) {
+                    if (frame.pressures[i] > 0.02f) {
+                        _latched_pressures[i] = std::max(_latched_pressures[i], frame.pressures[i]);
+                    }
+                    for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
+                        if (live_g[i][j] > 0.015f) {
+                            _latched_conductance[i][j] = std::max(_latched_conductance[i][j], live_g[i][j]);
+                            _latched_conductance[j][i] = _latched_conductance[i][j];
+                        }
                     }
                 }
+                _was_touching_first_bend = true;
+            } else if (_was_touching_first_bend) {
+                _has_latched_snapshot = true;
+                _was_touching_first_bend = false;
             }
         }
 
@@ -145,6 +151,8 @@ public:
     }
 
     void ClearLatched() {
+        _has_latched_snapshot = false;
+        _was_touching_first_bend = false;
         for (size_t i = 0; i < kSolverNodes; ++i) {
             _latched_pressures[i] = 0.0f;
             for (size_t j = 0; j < kSolverNodes; ++j) {
@@ -166,13 +174,18 @@ public:
     uint8_t NumActiveBridges() const { return _num_active_bridges; }
     const ActiveBridge* ActiveBridges() const { return _active_bridges; }
 
-    bool HasLatchedBridges() const {
+    bool HasLatched() const {
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
+            if (_latched_pressures[i] > 0.02f) return true;
             for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                 if (_latched_conductance[i][j] > 0.015f) return true;
             }
         }
         return false;
+    }
+
+    bool HasLatchedBridges() const {
+        return HasLatched();
     }
 
 private:
@@ -187,6 +200,8 @@ private:
     float        _total_current_load{0.0f};
 
     bool     _prev_is_latched{false};
+    bool     _has_latched_snapshot{false};
+    bool     _was_touching_first_bend{false};
     uint32_t _unlatch_timer{0};
 };
 

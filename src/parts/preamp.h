@@ -18,7 +18,6 @@ public:
     void Reset() {
         _dc_block_l.Reset();
         _dc_block_r.Reset();
-        _pluck = 0.0f;
         _motorboat_phase = 0.0f;
         _vol = 1.0f;
         _target_vol = 1.0f;
@@ -27,7 +26,7 @@ public:
     }
 
     void TriggerPluck(float strength) {
-        _pluck = std::max(_pluck, strength);
+        (void)strength;
     }
 
     inline void PrepareBlock(float knob_drive, float node_pull) {
@@ -57,13 +56,6 @@ public:
                         float v_rail_eff, float starve,
                         float shunt_gnd,
                         float& out_l, float& out_r) {
-        // Pluck impulse decay
-        float pluck_sig = 0.0f;
-        if (_pluck > 0.001f) {
-            pluck_sig = _pluck;
-            _pluck *= 0.995f;
-        }
-
         // Dying battery motorboat pulse (< 0.35V)
         float mb_sig = 0.0f;
         if (v_rail_eff < 0.35f) {
@@ -89,8 +81,7 @@ public:
         float comp = (_drive > 1.0f) ? (1.0f / (1.0f + 0.18f * (_drive - 1.0f))) : 1.0f;
 
         // Master preamp volume: S30 is volume control up to 12 o'clock, with clean mute at zero
-        float pluck_bypass = (_pluck > 0.001f) ? 0.25f : 0.0f;
-        float master_vol = std::clamp(_vol + pluck_bypass, 0.0f, 1.0f) * (1.0f - 0.25f * starve) * shunt_gnd;
+        float master_vol = _vol * (1.0f - 0.25f * starve) * shunt_gnd;
 
         // Tremolo modulation
         if (mods.tremolo > 0.0f) {
@@ -116,7 +107,7 @@ public:
 
             // Bridged oscillator injection is scaled by _vol so S30 provides volume control over oscillator voice
             float osc_in = osc_inject * _vol * 1.35f;
-            float amp_in = amp_core + osc_in + hum_inject * _vol + pluck_sig + mb_sig;
+            float amp_in = amp_core + osc_in + hum_inject * _vol + mb_sig;
             float biased_in = amp_in + bias_drift;
             float gated_in = biased_in;
 
@@ -160,7 +151,6 @@ private:
     float _sample_rate{48000.0f};
     DcBlocker _dc_block_l;
     DcBlocker _dc_block_r;
-    float _pluck{0.0f};
     float _motorboat_phase{0.0f};
     float _vol{1.0f};
     float _target_vol{1.0f};

@@ -17,6 +17,7 @@ public:
 
         _tracker_p10.Init();
         _tracker_p11.Init();
+        _tracker_flt.Init();
 
         for (size_t i = 0; i < 12; ++i) {
             _rest_scans[i] = 10;
@@ -42,9 +43,9 @@ public:
             frame.osc_mode = Oscillator::ModeSaw;
         }
 
-        // Switch B (Right): Up = Freeze, Down = Latch, Center = Live
+        // Switch B (Right): Up = Freeze (+ Latch!), Down = Latch, Center = Live
         frame.is_frozen = touch.switches().IsBUp();
-        frame.is_latched = touch.switches().IsBDown();
+        frame.is_latched = touch.switches().IsBDown() || touch.switches().IsBUp();
 
         // 2. Read Knobs & Faders (Symmetrical Delay Pedal + Lateral Flanking Benders)
         // Knobs S30..S35: The Complete Delay Pedal Signal Chain
@@ -76,30 +77,28 @@ public:
         if (frame.tap_vel_p10 > 0.0f) _board.GetContactMic().TriggerTap(frame.tap_vel_p10, false);
         if (frame.tap_vel_p11 > 0.0f) _board.GetContactMic().TriggerTap(frame.tap_vel_p11, true);
 
+        // Filter Pad (P04) Tap Ping Gesture (responsive gesture tracker)
+        frame.tap_vel_flt = 0.0f;
+        frame.tap_flt = false;
+        _tracker_flt.Update(frame.pressures[NodeFlt], frame.tap_vel_flt);
+        if (frame.tap_vel_flt > 0.0f) {
+            frame.tap_flt = true;
+            _board.GetFilter().TriggerPing(std::clamp(frame.tap_vel_flt * 1.20f, 0.25f, 1.20f));
+        }
+
         // 5. Standalone Pad Plucks and Pings
         frame.tap_amp = false;
-        frame.tap_flt = false;
         frame.tap_rst = false;
 
         if (new_scan) {
-            for (size_t i = 0; i < 12; ++i) {
-                float p = frame.pressures[i];
-                if (p <= 0.05f) {
-                    if (_rest_scans[i] < 255) _rest_scans[i]++;
-                } else {
-                    if (_rest_scans[i] >= 3 && p > 0.14f) {
-                        if (i == NodeAmp) {
-                            frame.tap_amp = true;
-                            _board.GetPreamp().TriggerPluck(0.85f * (frame.s30_amp + 0.25f));
-                        } else if (i == NodeFlt) {
-                            frame.tap_flt = true;
-                            _board.GetFilter().TriggerPing(0.75f);
-                        } else if (i == NodeRst) {
-                            frame.tap_rst = true;
-                        }
-                    }
-                    _rest_scans[i] = 0;
+            float p_rst = frame.pressures[NodeRst];
+            if (p_rst <= 0.05f) {
+                if (_rest_scans[NodeRst] < 255) _rest_scans[NodeRst]++;
+            } else {
+                if (_rest_scans[NodeRst] >= 3 && p_rst > 0.14f) {
+                    frame.tap_rst = true;
                 }
+                _rest_scans[NodeRst] = 0;
             }
         }
 
@@ -128,11 +127,18 @@ public:
         }
     }
 
+    void SetLedOverride(float b) { _led_override = b; }
+
     Board& GetBoard() { return _board; }
     const Board& GetBoard() const { return _board; }
 
 private:
     void UpdateLedState(bool is_latched) {
+        if (_led_override >= 0.0f) {
+            _led_brightness = _led_override;
+            return;
+        }
+
         float vcc = _board.GetRail().EffectiveVcc();
         bool beat = _board.ClkBeat();
 
@@ -160,10 +166,12 @@ private:
 
     PadGestureTracker _tracker_p10;
     PadGestureTracker _tracker_p11;
+    PadGestureTracker _tracker_flt;
     uint8_t _rest_scans[12]{10};
 
     float _led_brightness{0.0f};
     float _led_pwm_accum{0.0f};
+    float _led_override{-1.0f};
     uint16_t _latch_flash{0};
     float _latch_pulse_phase{0.0f};
 };

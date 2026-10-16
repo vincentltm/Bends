@@ -63,8 +63,14 @@ public:
         _tape_braking = false;
         _tape_brake_speed = 1.0f;
         _tape_brake_offset = 28.0f;
-        _warp_drag = 0.0f;
-        _warp_flutter_phase = 0.0f;
+        _glitch_timer = 0;
+        _glitch_grain_len = 2400;
+        _glitch_repeat_cnt = 0;
+        _glitch_repeat_target = 0;
+        _glitch_anchor_l = 4800.0f;
+        _glitch_anchor_r = 4800.0f;
+        _glitch_active = false;
+        _glitch_rng = 0x7A4C12D5u;
     }
 
     inline void ServiceIncrementalClear(size_t chunk_size = 4096) {
@@ -108,22 +114,7 @@ public:
                         float v_rail_eff, float starve, float shunt_dly, float shunt_fbk,
                         float& out_l, float& out_r) {
         float eff_clk_speed = _clk_fader_speed * (1.0f + mods.overclock) - mods.decimate;
-
-        // Overvoltage Tape Drag & Saturated Loop Print (Bend: P07 VCC <-> P06 DLY)
-        float warp_amt = std::clamp(mods.tape_warp_loop, 0.0f, 1.0f);
-        if (warp_amt > 0.005f) {
-            // Mechanical capstan drag: slows virtual tape speed down with smooth flywheel inertia
-            float target_drag = warp_amt * 0.35f;
-            _warp_drag += 0.004f * (target_drag - _warp_drag);
-
-            // 4.8 Hz authentic analog tape wow & flutter
-            _warp_flutter_phase += 4.8f * kTwoPi / _sample_rate;
-            if (_warp_flutter_phase >= kTwoPi) _warp_flutter_phase -= kTwoPi;
-        } else {
-            // Flywheel revs back up to full speed on release
-            _warp_drag += 0.003f * (0.0f - _warp_drag);
-        }
-        eff_clk_speed = std::clamp(eff_clk_speed * (1.0f - _warp_drag), 0.05f, 1.45f);
+        eff_clk_speed = std::clamp(eff_clk_speed, 0.05f, 1.45f);
 
         if (!_delay_time_initialized) {
             _head_a_samples = _target_samples;
@@ -280,9 +271,8 @@ public:
         // Tier 2: Subtle memory address flutter under starved power rail (0.70 -> 0.45)
         float starve_flutter = (starve > 0.30f) ? (FastSin(static_cast<float>(_lfsr) * 0.005f) * (starve - 0.30f) * 4.0f) : 0.0f;
 
-        float flutter = (warp_amt > 0.005f) ? (FastSin(_warp_flutter_phase) * (24.0f * warp_amt)) : 0.0f;
-        float mod_l = mods.time_mod + clk_fm_time_mod_l + starve_flutter + flutter;
-        float mod_r = -mods.time_mod + clk_fm_time_mod_r - starve_flutter + flutter * 0.85f;
+        float mod_l = mods.time_mod + clk_fm_time_mod_l + starve_flutter;
+        float mod_r = -mods.time_mod + clk_fm_time_mod_r - starve_flutter;
 
         // Rhythmic glitch stutter (< 35 Hz)
         if (mods.stutter > 0.015f && clk_is_slow) {
@@ -443,6 +433,109 @@ public:
             raw_r += mods.reverse * (rev_read_r - raw_r);
         }
 
+        // Dynamic Digital Buffer Glitch & Repeats (Bend: P07 VCC <-> P06 DLY)
+        // Strictly zero pitch shift: read pointer advances at normal 1.0x playback speed.
+        // Pressure-sensitive multi-mode:
+        //   - Light touch (< 0.40): Rhythmic phrase slips & syncopated musical subdivisions (100ms..220ms)
+        //   - Medium touch (0.40..0.75): Stutter ratchets & micro-loop rolls (35ms..80ms)
+        //   - Firm touch (>= 0.75): Granular memory fracture & CD skips (15ms..38ms)
+        // Anti-click raised-cosine windowing on every grain repetition.
+        // Audibly prominent (55% to 92% wet) during active slices.
+        // NO forced runaway feedback: delay loop follows user feedback knob setting.
+        float slip_amt = std::clamp(mods.buffer_slip, 0.0f, 1.0f);
+        if (slip_amt > 0.02f) {
+            if (!_glitch_active) {
+                _glitch_active = true;
+                _glitch_timer = 0;
+                _glitch_repeat_cnt = 0;
+                _glitch_repeat_target = 0; // Triggers immediate grain initialization
+            }
+
+            _glitch_timer++;
+            if (_glitch_timer >= _glitch_grain_len || _glitch_repeat_target == 0) {
+                _glitch_timer = 0;
+                if (_glitch_repeat_target > 0) {
+                    _glitch_repeat_cnt++;
+                }
+
+                if (_glitch_repeat_target == 0 || _glitch_repeat_cnt >= _glitch_repeat_target) {
+                    _glitch_repeat_cnt = 0;
+
+                    // 32-bit Xorshift RNG
+                    _glitch_rng ^= _glitch_rng << 13;
+                    _glitch_rng ^= _glitch_rng >> 17;
+                    _glitch_rng ^= _glitch_rng << 5;
+
+                    float span = std::max(2400.0f, base_read_samples);
+
+                    if (slip_amt < 0.40f) {
+                        // Mode A (Light touch): Rhythmic phrase slips & subdivisions (100ms .. 220ms)
+                        _glitch_grain_len = 4800 + (_glitch_rng % 5760);
+                        _glitch_repeat_target = 1 + (_glitch_rng % 2); // 1 or 2 repeats
+                        static const float kDivsA[6] = {0.25f, 0.333f, 0.50f, 0.667f, 0.75f, 1.00f};
+                        uint8_t d_idx = (_glitch_rng >> 4) % 6;
+                        _glitch_anchor_l = span * kDivsA[d_idx];
+                        _glitch_anchor_r = _glitch_anchor_l * 1.02f + 96.0f;
+                    } else if (slip_amt < 0.75f) {
+                        // Mode B (Medium touch): Stutter ratchets & micro-loop rolls (35ms .. 80ms)
+                        _glitch_grain_len = 1680 + (_glitch_rng % 2160);
+                        _glitch_repeat_target = 2 + (_glitch_rng % 4); // 2 to 5 repeats (stutter roll!)
+                        static const float kDivsB[8] = {0.15f, 0.25f, 0.333f, 0.50f, 0.667f, 0.75f, 0.85f, 1.00f};
+                        uint8_t d_idx = (_glitch_rng >> 4) % 8;
+                        float jitter = 0.95f + 0.10f * (static_cast<float>(_glitch_rng & 0x3FFF) / 16384.0f);
+                        _glitch_anchor_l = span * kDivsB[d_idx] * jitter;
+                        _glitch_anchor_r = _glitch_anchor_l + 192.0f;
+                    } else {
+                        // Mode C (Firm touch): Granular memory fracture & CD skips (15ms .. 38ms)
+                        _glitch_grain_len = 720 + (_glitch_rng % 1100);
+                        _glitch_repeat_target = 4 + (_glitch_rng % 6); // 4 to 9 rapid repeats
+                        static const float kMicroJumps[6] = {512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f};
+                        uint8_t j_idx = (_glitch_rng >> 3) % 6;
+                        _glitch_anchor_l = kMicroJumps[j_idx];
+                        _glitch_anchor_r = kMicroJumps[(j_idx + 1) % 6];
+                    }
+
+                    _glitch_anchor_l = std::clamp(_glitch_anchor_l, 24.0f, static_cast<float>(_buffer.MaxSize() - 48000));
+                    _glitch_anchor_r = std::clamp(_glitch_anchor_r, 24.0f, static_cast<float>(_buffer.MaxSize() - 48000));
+                }
+            }
+
+            // Anti-click raised-cosine window per grain repetition (3ms = 144 samples)
+            constexpr uint32_t kFade = 144;
+            float grain_win = 1.0f;
+            if (_glitch_grain_len > (kFade * 2)) {
+                if (_glitch_timer < kFade) {
+                    grain_win = 0.5f * (1.0f - FastCos((static_cast<float>(_glitch_timer) / kFade) * kPi));
+                } else if (_glitch_grain_len - _glitch_timer < kFade) {
+                    grain_win = 0.5f * (1.0f - FastCos((static_cast<float>(_glitch_grain_len - _glitch_timer) / kFade) * kPi));
+                }
+            }
+
+            // Constant delay distance during each repeat: advances strictly at 1.0x playback speed (0 pitch shift)
+            float read_dist_l = _glitch_anchor_l + static_cast<float>(_glitch_repeat_cnt * _glitch_grain_len);
+            float read_dist_r = _glitch_anchor_r + static_cast<float>(_glitch_repeat_cnt * _glitch_grain_len);
+
+            // Firm touch can introduce occasional address line scramble
+            if (slip_amt > 0.88f && ((_glitch_rng & 0x7) == 0)) {
+                read_dist_l = static_cast<float>(static_cast<uint32_t>(read_dist_l) ^ 0x01E0);
+            }
+
+            read_dist_l = std::clamp(read_dist_l, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+            read_dist_r = std::clamp(read_dist_r, 8.0f, static_cast<float>(_buffer.MaxSize() - 2));
+
+            float slipped_l = _buffer.ReadL(read_dist_l);
+            float slipped_r = _buffer.ReadR(read_dist_r);
+
+            // Punchy, audible glitch presence: 55% wet on light touch, up to 92% on firm touch
+            float blend = std::clamp(0.40f + slip_amt * 0.55f, 0.0f, 0.92f) * grain_win;
+            raw_l = raw_l * (1.0f - blend) + slipped_l * blend;
+            raw_r = raw_r * (1.0f - blend) + slipped_r * blend;
+        } else {
+            _glitch_active = false;
+            _glitch_timer = 0;
+            _glitch_repeat_cnt = 0;
+        }
+
         // Loop damping filter
         _damp_l += string_damp * (raw_l - _damp_l);
         _damp_r += string_damp * (raw_r - _damp_r);
@@ -480,23 +573,14 @@ public:
         float clock_burst_fb = (mods.fbk_clock_burst > 0.01f) ? (clk_phase < 0.22f ? mods.fbk_clock_burst * 0.65f : 0.0f) : 0.0f;
         float total_fb = (eff_fb + clock_burst_fb) * shunt_fbk * fb_xfade_duck;
 
-        // Overvoltage Sound-on-Sound Looper (VCC <-> DLY):
-        // Holds loop infinitely (>= 1.0) while bend is active so old audio never dies,
-        // and drives feedback into warm tape saturation that gets written to the buffer
-        if (warp_amt > 0.005f) {
-            total_fb = std::max(total_fb, 0.998f + 0.08f * warp_amt);
-        }
-
         float fb_tot_l = (_damp_l * direct + _damp_r * cross) * total_fb;
         float fb_tot_r = (_damp_r * direct + _damp_l * cross) * total_fb;
 
         // SDRAM buffer write (inhibited during freeze or deep glitch)
         bool write_inhibited = eff_frozen || (glitch_intensity > 0.15f) || (eff_xor > 0.60f);
         if (!write_inhibited) {
-            float fb_drive = 1.0f + 2.4f * warp_amt;
-            // Warm tape saturation: dynamically soft-clips and normalizes to prevent volume runaway
-            float sat_fb_l = FastTanh(fb_tot_l * fb_drive) * (1.0f / std::sqrt(1.0f + 0.6f * warp_amt));
-            float sat_fb_r = FastTanh(fb_tot_r * fb_drive) * (1.0f / std::sqrt(1.0f + 0.6f * warp_amt));
+            float sat_fb_l = FastTanh(fb_tot_l);
+            float sat_fb_r = FastTanh(fb_tot_r);
 
             float dly_in_l = _dc_block_l.Process(in_l + sat_fb_l);
             float dly_in_r = _dc_block_r.Process(in_r + sat_fb_r);
@@ -553,8 +637,14 @@ private:
     float _tape_brake_speed{1.0f};
     float _tape_brake_offset{28.0f};
 
-    float _warp_drag{0.0f};
-    float _warp_flutter_phase{0.0f};
+    uint32_t _glitch_timer{0};
+    uint32_t _glitch_grain_len{2400};
+    uint8_t  _glitch_repeat_cnt{0};
+    uint8_t  _glitch_repeat_target{0};
+    float    _glitch_anchor_l{4800.0f};
+    float    _glitch_anchor_r{4800.0f};
+    bool     _glitch_active{false};
+    uint32_t _glitch_rng{0x7A4C12D5u};
 };
 
 } // namespace bends

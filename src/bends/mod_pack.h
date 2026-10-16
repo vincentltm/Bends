@@ -39,7 +39,7 @@ struct DelayMods {
     float ping_pong{0.0f};
     float beat_repeat{0.0f};
     float tape_stop{0.0f};
-    float tape_warp_loop{0.0f};
+    float buffer_slip{0.0f};
     float fbk_filter_loop{0.0f};
     float fbk_recirc_fm{0.0f};
     float fbk_clock_burst{0.0f};
@@ -98,7 +98,7 @@ struct BoardMods {
             case Slot::DlyPingPong:    delay.ping_pong = std::max(delay.ping_pong, eff); break;
             case Slot::DlyBeatRepeat:  delay.beat_repeat = std::max(delay.beat_repeat, eff); break;
             case Slot::DlyTapeStop:     delay.tape_stop = std::max(delay.tape_stop, eff); break;
-            case Slot::DlyTapeWarpLoop: delay.tape_warp_loop = std::max(delay.tape_warp_loop, eff); break;
+            case Slot::DlyBufferSlip:   delay.buffer_slip = std::max(delay.buffer_slip, eff); break;
 
             case Slot::FbkFilterLoop:   delay.fbk_filter_loop = std::max(delay.fbk_filter_loop, eff); break;
             case Slot::FbkRecircFm:    delay.fbk_recirc_fm += eff; break;

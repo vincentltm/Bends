@@ -36,6 +36,7 @@ struct ControlFrame {
     // Standalone pad taps
     bool tap_amp{false};
     bool tap_flt{false};
+    float tap_vel_flt{0.0f};
     bool tap_rst{false};
 
     uint32_t frame_index{0};

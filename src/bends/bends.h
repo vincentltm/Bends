@@ -34,8 +34,8 @@ constexpr Bend kBends[] = {
     // -------------------------------------------------------------
     // P07 (VCC) Bends
     // -------------------------------------------------------------
-    // VCC <-> DLY: Overvoltage Tape Drag & Saturated Sound-on-Sound Loop Print
-    { NodeVcc, NodeDly, Verb::Set,      Slot::DlyTapeWarpLoop, Sig::One,       1.00f, When::Always },
+    // VCC <-> DLY: Subtle Digital Buffer Slip & Random Repeats Loop Print
+    { NodeVcc, NodeDly, Verb::Set,      Slot::DlyBufferSlip,   Sig::One,       1.00f, When::Always },
     // VCC <-> CLK: Overclock speed boost
     { NodeVcc, NodeClk, Verb::Modulate, Slot::DlyOverclock,  Sig::One,       0.35f, When::Always },
     // VCC <-> FBK: Power bus XOR memory address line scrambling
@@ -52,9 +52,8 @@ constexpr Bend kBends[] = {
     { NodeOsc, NodeAmp, Verb::Set,      Slot::PreampRingMod, Sig::One,       1.00f, When::Always },
     // OSC <-> GND: Grounded upper-octave engages sub-octave divider
     { NodeOsc, NodeGnd, Verb::Set,      Slot::OscSubOctave,  Sig::One,       1.00f, When::Always },
-    // OSC <-> FLT: Cutoff ramp sweep (in Saw) + flyback resonant ping
+    // OSC <-> FLT: Cutoff ramp sweep (in Saw)
     { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::OscRamp,   1.35f, When::Saw },
-    { NodeOsc, NodeFlt, Verb::Trigger,  Slot::FltPing,       Sig::OscReset,  0.25f, When::Saw },
     // OSC <-> FLT: Liquid Filter FM (in Sin)
     { NodeOsc, NodeFlt, Verb::Modulate, Slot::FltCutoffRamp, Sig::Osc,       1.20f, When::Sin },
     // OSC <-> FLT: Stepped S&H Filter Sweeps (in Rnd)

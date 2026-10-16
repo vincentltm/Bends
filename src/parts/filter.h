@@ -10,6 +10,43 @@ namespace bends {
 
 class Filter {
 public:
+    struct PingExciter {
+        bool     active{false};
+        uint16_t sample_idx{0};
+        uint16_t total_samples{24};
+        float    amplitude{0.0f};
+        float    phase{0.0f};
+        float    phase_inc{0.0f};
+
+        void Trigger(float vel) {
+            vel = std::clamp(vel, 0.15f, 1.20f);
+            active = true;
+            sample_idx = 0;
+            total_samples = 24; // 0.5 ms @ 48 kHz
+            phase_inc = kPi / 24.0f;
+            phase = 0.0f;
+            amplitude = vel;
+        }
+
+        inline float Tick() {
+            if (!active) return 0.0f;
+            sample_idx++;
+            if (sample_idx >= total_samples) {
+                active = false;
+                return 0.0f;
+            }
+            phase += phase_inc;
+            return FastSin(phase) * amplitude;
+        }
+
+        void Reset() {
+            active = false;
+            sample_idx = 0;
+            phase = 0.0f;
+            amplitude = 0.0f;
+        }
+    };
+
     void Init(float sample_rate) {
         _sample_rate = sample_rate;
         Reset();
@@ -19,20 +56,24 @@ public:
         _flt_low_l = 0.0f; _flt_low_r = 0.0f;
         _flt_s1_l = 0.0f;  _flt_s2_l = 0.0f;
         _flt_s1_r = 0.0f;  _flt_s2_r = 0.0f;
-        _ping = 0.0f;
         _ping_env = 0.0f;
         _base_freq = 440.0f;
+        _exciter_l.Reset();
+        _exciter_r.Reset();
         _dc_block_l.Reset();
         _dc_block_r.Reset();
     }
 
     void TriggerPing(float strength) {
-        _ping = std::max(_ping, strength);
+        _exciter_l.Trigger(strength);
+        _exciter_r.Trigger(strength);
+        _ping_env = 1.0f;
     }
 
     inline void PrepareBlock(float knob_flt, float node_pull, float touch_flt, float air_hover) {
-        float flt_dc = std::clamp(knob_flt + node_pull * 0.20f + 0.15f * touch_flt + air_hover * 0.12f, 0.0f, 1.0f);
-        _base_freq = 28.0f * FastPow2(flt_dc * 9.6f);
+        float flt_dc = std::clamp(knob_flt + node_pull * 0.20f + 0.12f * touch_flt + air_hover * 0.12f, 0.0f, 1.0f);
+        float target = 28.0f * FastPow2(flt_dc * 9.6f);
+        _base_freq += 0.25f * (target - _base_freq);
     }
 
     inline void Process(float in_l, float in_r,
@@ -61,31 +102,48 @@ public:
         }
         freq = std::clamp(freq, 25.0f, 21500.0f);
 
-        // Ping impulses
-        if (mods.ping > 0.0f) {
-            _ping = std::max(_ping, mods.ping);
+        // Bends: trigger ping from mod pack
+        if (mods.ping > 0.001f) {
+            TriggerPing(mods.ping);
         }
 
-        if (_ping > 0.001f) {
-            _flt_s1_l += _ping;
-            _flt_s1_r += _ping;
-            _ping_env = std::min(1.0f, _ping_env + _ping);
-            _ping = 0.0f;
+        // 2x oversampled TPT SVF pre-warped frequency
+        float g = FastTan(kPi * freq / (2.0f * _sample_rate));
+        g = std::clamp(g, 0.001f, 1.25f);
+
+        // Bandlimited smooth acoustic excitation pulse into filter inputs (zero DC clicks/aliasing)
+        float exc_scale = std::min(2.5f, 0.09f / std::sqrt(std::max(0.001f, g)));
+        float exc_l = _exciter_l.Tick() * exc_scale;
+        float exc_r = _exciter_r.Tick() * exc_scale;
+        in_l += exc_l;
+        in_r += exc_r;
+
+        // Ping decay envelope
+        if (_ping_env > 0.0001f) {
+            _ping_env *= 0.99982f; // ~150-250 ms ring decay
         } else {
-            _ping_env *= 0.9994f; // ~150 ms ring tail
+            _ping_env = 0.0f;
         }
 
-        // Resonance: flat Butterworth passband when untouched (res_raw = 0.0)
-        // Pad 04 (FLT) pressure smoothly sweeps resonance into ringing self-oscillation
-        float res_raw = touch_flt * 0.82f + _ping_env * 0.35f + mods.resonance;
-        res_raw *= shunt_gnd;
-        res_raw = std::clamp(res_raw, 0.0f, 0.98f);
+        // Isochronous acoustic ping resonance:
+        // Scales damping factor r_ping with frequency so all cutoff frequencies ring with singing acoustic presence
+        float r_ping = std::clamp(0.0006f / g, 0.025f, 0.075f);
+        float ping_fade = 1.0f - _ping_env;
+        float ping_fade3 = ping_fade * ping_fade * ping_fade;
+        float r_ping_eff = r_ping + (0.707f - r_ping) * ping_fade3;
 
-        float starve_choke = std::clamp((v_rail_eff - 0.15f) / 0.45f, 0.0f, 1.0f);
-        starve_choke = starve_choke + (1.0f - starve_choke) * std::min(1.0f, mods.howl * 1.4f);
-        float res_eff = res_raw * starve_choke;
+        // Pad 04 continuous touch sweeps resonance from Butterworth (0.707) into singing self-oscillation
+        // Smooth musical curve bounded between 0.707 (flat) and 0.028 (Q ≈ 18 singing limit-cycle tone)
+        float res = std::clamp(touch_flt + mods.resonance, 0.0f, 1.0f);
+        float inv_res = 1.0f - res;
+        float r_touch = 0.028f + (0.707f - 0.028f) * (inv_res * inv_res);
 
-        float R = 0.707f * (1.0f - std::clamp(res_eff, 0.0f, 0.96f)) + 0.025f;
+        // Active damping R (lowest damping factor wins, strictly bounded to prevent harsh digital runaway)
+        float R = std::min(r_ping_eff, r_touch);
+        R = std::max(0.025f, R);
+        // Ground shunt damping (pulling FLT to GND suppresses resonance)
+        R = 0.707f + (R - 0.707f) * shunt_gnd;
+
         float starve_damping = (v_rail_eff < 0.50f) ? (0.50f - v_rail_eff) * 1.6f : 0.0f;
         starve_damping *= (1.0f - std::min(1.0f, mods.howl * 1.5f));
         R += starve_damping;
@@ -96,9 +154,6 @@ public:
             in_r += starve * mods.howl * 0.35f;
         }
 
-        // 2x oversampled TPT SVF trapezoidal integration
-        float g = FastTan(kPi * freq / (2.0f * _sample_rate));
-        g = std::clamp(g, 0.001f, 1.25f);
         float h = 1.0f / (1.0f + 2.0f * R * g + g * g);
 
         float flt_headroom = (v_rail_eff > 0.45f) ? (1.50f + 0.30f * ((v_rail_eff - 0.45f) / 0.55f))
@@ -178,9 +233,11 @@ private:
     float _flt_low_l{0.0f}; float _flt_low_r{0.0f};
     float _flt_s1_l{0.0f};  float _flt_s2_l{0.0f};
     float _flt_s1_r{0.0f};  float _flt_s2_r{0.0f};
-    float _ping{0.0f};
     float _ping_env{0.0f};
     float _base_freq{440.0f};
+
+    PingExciter _exciter_l;
+    PingExciter _exciter_r;
 
     DcBlocker _dc_block_l;
     DcBlocker _dc_block_r;
